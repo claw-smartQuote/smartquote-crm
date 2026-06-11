@@ -1,0 +1,193 @@
+{% extends "base.html" %}
+{% block title %}保障管理 - 保險客戶管理系統{% endblock %}
+{% block content %}
+<h2 class="mb-4 fw-bold">🛡️ 保障管理</h2>
+
+<div class="row g-4">
+    <!-- Select Policy -->
+    <div class="col-md-5">
+        <div class="card shadow-sm">
+            <div class="card-header bg-white">
+                <strong>選擇保單</strong>
+            </div>
+            <div class="card-body p-0">
+                <div class="table-responsive">
+                    <table class="table table-hover mb-0">
+                        <thead class="table-light">
+                            <tr><th>車牌</th><th>客戶</th><th>險種</th><th>選擇</th></tr>
+                        </thead>
+                        <tbody>
+                            {% for p in policies %}
+                            <tr data-id="{{ p.id }}">
+                                <td><span class="badge bg-dark">{{ p.license_plate }}</span></td>
+                                <td>{{ p.customer_name }}</td>
+                                <td>{{ p.policy_type }}</td>
+                                <td>
+                                    <button class="btn btn-sm btn-outline-primary" onclick="selectPolicy({{ p.id }})">選擇</button>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Coverage Details -->
+    <div class="col-md-7">
+        <div class="card shadow-sm">
+            <div class="card-header bg-white d-flex justify-content-between align-items-center">
+                <strong id="coverageTitle">保障項目</strong>
+                <div>
+                    <button class="btn btn-sm btn-primary" id="addCoverageBtn" onclick="openAddCoverage()" disabled>+ 新增保障</button>
+                </div>
+            </div>
+            <div class="card-body p-0">
+                <div class="table-responsive">
+                    <table class="table table-hover mb-0">
+                        <thead class="table-light">
+                            <tr><th>保障名稱</th><th>保障金額</th><th>保費</th><th>備註</th><th>操作</th></tr>
+                        </thead>
+                        <tbody id="coveragesBody">
+                            <tr><td colspan="5" class="text-center text-muted py-4">請先選擇保單</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Add Coverage Modal -->
+<div class="modal fade" id="coverageModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">新增保障項目</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="coveragePolicyId">
+                <div class="mb-3">
+                    <label class="form-label">保障名稱 *</label>
+                    <input type="text" class="form-control" id="inputCoverageName" placeholder="如：第三者責任保障">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">保障金額</label>
+                    <input type="number" class="form-control" id="inputCovAmount" value="0">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">保費</label>
+                    <input type="number" class="form-control" id="inputCovPremium" value="0">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">備註</label>
+                    <input type="text" class="form-control" id="inputCovNotes">
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-primary" onclick="saveCoverage()">儲存</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Confirm Delete Modal -->
+<div class="modal fade" id="confirmModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title text-danger">⚠️ 確認刪除</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">確定要刪除此保障項目嗎？</div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-danger" id="confirmDeleteBtn">確認刪除</button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let modal, confirmModal, selectedPolicyId = null;
+
+document.addEventListener('DOMContentLoaded', () => {
+    modal = new bootstrap.Modal(document.getElementById('coverageModal'));
+    confirmModal = new bootstrap.Modal(document.getElementById('confirmModal'));
+});
+
+async function selectPolicy(id) {
+    selectedPolicyId = id;
+    document.getElementById('addCoverageBtn').disabled = false;
+    const res = await axios.get(`/api/coverages/${id}`);
+    const list = res.data;
+    const tbody = document.getElementById('coveragesBody');
+    if (list.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted py-3">暫無保障項目，點擊「新增保障」添加</td></tr>';
+    } else {
+        tbody.innerHTML = list.map(c => `
+            <tr>
+                <td>${c.coverage_name}</td>
+                <td>$${(c.coverage_amount||0).toLocaleString()}</td>
+                <td>$${(c.premium||0).toLocaleString()}</td>
+                <td>${c.notes||''}</td>
+                <td>
+                    <button class="btn btn-sm btn-outline-danger" onclick="deleteCoverage(${c.id})">刪除</button>
+                </td>
+            </tr>`).join('');
+    }
+}
+
+function openAddCoverage() {
+    if (!selectedPolicyId) return;
+    document.getElementById('coveragePolicyId').value = selectedPolicyId;
+    document.getElementById('inputCoverageName').value = '';
+    document.getElementById('inputCovAmount').value = '0';
+    document.getElementById('inputCovPremium').value = '0';
+    document.getElementById('inputCovNotes').value = '';
+    modal.show();
+}
+
+async function saveCoverage() {
+    const name = document.getElementById('inputCoverageName').value.trim();
+    if (!name) { alert('請輸入保障名稱'); return; }
+    const data = {
+        policy_id: parseInt(selectedPolicyId),
+        coverage_name: name,
+        coverage_amount: parseFloat(document.getElementById('inputCovAmount').value) || 0,
+        premium: parseFloat(document.getElementById('inputCovPremium').value) || 0,
+        notes: document.getElementById('inputCovNotes').value,
+    };
+    showLoading();
+    try {
+        await axios.post('/api/coverages', data, { headers: { 'Content-Type': 'application/json' } });
+        modal.hide();
+        selectPolicy(selectedPolicyId);
+    } catch(e) { alert('儲存失敗'); }
+    finally { hideLoading(); }
+}
+
+let deleteTarget = null;
+function deleteCoverage(id) {
+    deleteTarget = id;
+    confirmModal.show();
+}
+document.getElementById('confirmDeleteBtn').onclick = async () => {
+    showLoading();
+    try {
+        await axios.delete(`/api/coverages/${deleteTarget}`);
+        confirmModal.hide();
+        if (selectedPolicyId) selectPolicy(selectedPolicyId);
+    } catch(e) { alert('刪除失敗'); }
+    finally { hideLoading(); }
+};
+
+function showLoading() { document.getElementById('loadingOverlay').style.display='flex'; }
+function hideLoading() { document.getElementById('loadingOverlay').style.display='none'; }
+</script>
+{% endblock %}

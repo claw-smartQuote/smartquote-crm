@@ -1,0 +1,232 @@
+{% extends "base.html" %}
+{% block title %}客戶管理 - 保險客戶管理系統{% endblock %}
+{% block content %}
+<h2 class="mb-4 fw-bold">👤 客戶管理</h2>
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <div class="input-group w-50">
+        <input type="text" id="searchInput" class="form-control" placeholder="搜尋客戶姓名或電話..." oninput="filterCustomers()">
+    </div>
+    <button class="btn btn-primary" onclick="openAddModal()">+ 新增客戶</button>
+</div>
+
+<div class="card shadow-sm">
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-hover mb-0" id="customerTable">
+                <thead class="table-light">
+                    <tr>
+                        <th onclick="sortTable('name')" style="cursor:pointer">姓名 ⇅</th>
+                        <th onclick="sortTable('phone')" style="cursor:pointer">電話 ⇅</th>
+                        <th onclick="sortTable('email')" style="cursor:pointer">電郵 ⇅</th>
+                        <th>保單數</th>
+                        <th>操作</th>
+                    </tr>
+                </thead>
+                <tbody id="customerBody">
+                    {% for c in customers %}
+                    <tr data-id="{{ c.id }}" data-name="{{ c.name }}" data-phone="{{ c.phone }}" data-email="{{ c.email }}">
+                        <td><strong>{{ c.name }}</strong></td>
+                        <td>{{ c.phone }}</td>
+                        <td>{{ c.email }}</td>
+                        <td><span class="badge bg-secondary" id="policyCount-{{ c.id }}">–</span></td>
+                        <td>
+                            <div class="btn-group btn-group-sm">
+                            {% if c.phone %}
+                            <a href="https://wa.me/852{{ c.phone }}" target="_blank" class="btn btn-success" title="WhatsApp">📱</a>
+                            {% endif %}
+                            <button class="btn btn-outline-primary" onclick='viewPolicies({{ c.id }})'>保單</button>
+                            <button class="btn btn-outline-warning" onclick='editCustomer({{ c.id }})'>編輯</button>
+                            <button class="btn btn-outline-danger" onclick='deleteCustomer({{ c.id }})'>刪除</button>
+                        </div>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<!-- Policies Modal -->
+<div class="modal fade" id="policiesModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">客戶保單 - <span id="modalCustomerName"></span></h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body p-0">
+                <div class="table-responsive">
+                    <table class="table table-hover mb-0">
+                        <thead class="table-light">
+                            <tr><th>車牌</th><th>險種</th><th>保額</th><th>保費</th><th>到期日</th><th>狀態</th></tr>
+                        </thead>
+                        <tbody id="policiesModalBody"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Add/Edit Modal -->
+<div class="modal fade" id="customerModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="modalTitle">新增客戶</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="editId">
+                <div class="mb-3">
+                    <label class="form-label">姓名 *</label>
+                    <input type="text" class="form-control" id="inputName" required>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">電話</label>
+                    <input type="text" class="form-control" id="inputPhone">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">電郵</label>
+                    <input type="email" class="form-control" id="inputEmail">
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-primary" onclick="saveCustomer()">儲存</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Confirm Delete Modal -->
+<div class="modal fade" id="confirmModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title text-danger">⚠️ 確認刪除</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">確定要刪除此客戶嗎？此操作無法撤銷。</div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-danger" id="confirmDeleteBtn">確認刪除</button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let modal, policiesModal, confirmModal;
+document.addEventListener('DOMContentLoaded', () => {
+    modal = new bootstrap.Modal(document.getElementById('customerModal'));
+    policiesModal = new bootstrap.Modal(document.getElementById('policiesModal'));
+    confirmModal = new bootstrap.Modal(document.getElementById('confirmModal'));
+    loadPolicyCounts();
+});
+
+async function loadPolicyCounts() {
+    try {
+        const res = await axios.get('/api/customers');
+        for (const c of res.data) {
+            const pres = await axios.get(`/api/customers/${c.id}/policies`);
+            const el = document.getElementById(`policyCount-${c.id}`);
+            if (el) el.textContent = pres.data.length;
+        }
+    } catch(e) {}
+}
+
+function openAddModal() {
+    document.getElementById('modalTitle').textContent = '新增客戶';
+    document.getElementById('editId').value = '';
+    document.getElementById('inputName').value = '';
+    document.getElementById('inputPhone').value = '';
+    document.getElementById('inputEmail').value = '';
+    modal.show();
+}
+
+function editCustomer(id) {
+    const row = document.querySelector(`tr[data-id="${id}"]`);
+    document.getElementById('modalTitle').textContent = '編輯客戶';
+    document.getElementById('editId').value = id;
+    document.getElementById('inputName').value = row.dataset.name;
+    document.getElementById('inputPhone').value = row.dataset.phone;
+    document.getElementById('inputEmail').value = row.dataset.email;
+    modal.show();
+}
+
+async function saveCustomer() {
+    const id = document.getElementById('editId').value;
+    const name = document.getElementById('inputName').value.trim();
+    const phone = document.getElementById('inputPhone').value.trim();
+    const email = document.getElementById('inputEmail').value.trim();
+    if (!name) { alert('請輸入姓名'); return; }
+    showLoading();
+    try {
+        if (id) {
+            await axios.put(`/api/customers/${id}`, { name, phone, email }, { headers: { 'Content-Type': 'application/json' } });
+        } else {
+            await axios.post('/api/customers', { name, phone, email }, { headers: { 'Content-Type': 'application/json' } });
+        }
+        location.reload();
+    } catch(e) { alert('儲存失敗'); }
+    finally { hideLoading(); }
+}
+
+let deleteTarget = null;
+function deleteCustomer(id) {
+    deleteTarget = id;
+    confirmModal.show();
+}
+document.getElementById('confirmDeleteBtn').onclick = async () => {
+    showLoading();
+    try {
+        await axios.delete(`/api/customers/${deleteTarget}`);
+        location.reload();
+    } catch(e) { alert('刪除失敗'); }
+    finally { hideLoading(); }
+};
+
+async function viewPolicies(cid) {
+    document.getElementById('modalCustomerName').textContent = document.querySelector(`tr[data-id="${cid}"]`).dataset.name;
+    const res = await axios.get(`/api/customers/${cid}/policies`);
+    const tbody = document.getElementById('policiesModalBody');
+    if (res.data.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-3">暫無保單</td></tr>';
+    } else {
+        tbody.innerHTML = res.data.map(p => `
+            <tr>
+                <td><span class="badge bg-dark">${p.license_plate}</span></td>
+                <td>${p.policy_type}</td>
+                <td>$${p.coverage_amount.toLocaleString()}</td>
+                <td>$${p.premium.toLocaleString()}</td>
+                <td>${p.expiry_date}</td>
+                <td><span class="badge bg-${p.status==='active'?'success':p.status==='expired'?'danger':'secondary'}">${p.status}</span></td>
+            </tr>`).join('');
+    }
+    policiesModal.show();
+}
+
+function filterCustomers() {
+    const q = document.getElementById('searchInput').value.toLowerCase();
+    document.querySelectorAll('#customerBody tr').forEach(row => {
+        row.style.display = (row.dataset.name.includes(q) || row.dataset.phone.includes(q)) ? '' : 'none';
+    });
+}
+
+function sortTable(key) {
+    // Simple sort toggle
+    const tbody = document.getElementById('customerBody');
+    const rows = Array.from(tbody.querySelectorAll('tr'));
+    rows.sort((a,b) => a.dataset[key] > b.dataset[key] ? 1 : -1);
+    rows.forEach(r => tbody.appendChild(r));
+}
+
+function showLoading() { document.getElementById('loadingOverlay').style.display='flex'; }
+function hideLoading() { document.getElementById('loadingOverlay').style.display='none'; }
+</script>
+{% endblock %}

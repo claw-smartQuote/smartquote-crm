@@ -1,0 +1,130 @@
+/* Insurance CRM Web - Custom Styles */
+:root {
+    --primary: #0d6efd;
+    --sidebar-bg: #1a1a2e;
+    --sidebar-active: #16213e;
+    --sidebar-text: #e0e0e0;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang HK", "Microsoft JhengHei", sans-serif;
+    background-color: #f4f6f9;
+}
+
+.sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    height: 100vh;
+    width: 220px;
+    background: var(--sidebar-bg);
+    color: var(--sidebar-text);
+    padding-top: 1rem;
+    z-index: 100;
+    overflow-y: auto;
+}
+
+.sidebar .logo {
+    font-size: 1.1rem;
+    font-weight: bold;
+    color: #fff;
+    padding: 0.75rem 1.25rem;
+    border-bottom: 1px solid rgba(255,255,255,0.1);
+    margin-bottom: 0.5rem;
+}
+
+.sidebar a {
+    color: var(--sidebar-text);
+    padding: 0.75rem 1.25rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    text-decoration: none;
+    font-size: 0.9rem;
+    transition: background 0.2s;
+    border-left: 3px solid transparent;
+}
+
+.sidebar a:hover {
+    background: var(--sidebar-active);
+    color: #fff;
+}
+
+.sidebar a.active {
+    background: var(--sidebar-active);
+    color: #fff;
+    border-left-color: var(--primary);
+}
+
+.main-content {
+    margin-left: 220px;
+    padding: 1.5rem;
+    min-height: 100vh;
+}
+
+.card-stat {
+    border: none;
+    border-radius: 12px;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.08);
+    transition: transform 0.2s;
+}
+
+.card-stat:hover {
+    transform: translateY(-2px);
+}
+
+.stat-value {
+    font-size: 2rem;
+    font-weight: 700;
+    color: #333;
+}
+
+.stat-label {
+    font-size: 0.85rem;
+    color: #888;
+}
+
+.badge-active { background: #198754; }
+.badge-expired { background: #dc3545; }
+.badge-cancelled { background: #6c757d; }
+
+.table-responsive { border-radius: 12px; overflow: hidden; background: #fff; }
+
+.btn-group-sm > .btn { font-size: 0.8rem; }
+
+.loading-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(255,255,255,0.8);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 9999;
+}
+
+.spinner-wrapper {
+    text-align: center;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+    .sidebar {
+        width: 60px;
+        overflow: visible;
+    }
+    .sidebar .logo,
+    .sidebar a span {
+        display: none;
+    }
+    .sidebar a {
+        justify-content: center;
+        padding: 1rem;
+    }
+    .sidebar a svg { width: 20px; height: 20px; }
+    .main-content { margin-left: 60px; padding: 1rem; }
+}
+
+@media (max-width: 576px) {
+    .card-stat { margin-bottom: 1rem; }
+    .stat-value { font-size: 1.5rem; }
+}

@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+{% block title %}匯出備份 - 保險客戶管理系統{% endblock %}
+{% block content %}
+<h2 class="mb-4 fw-bold">📤 匯出與備份</h2>
+
+<div class="row g-4">
+    <!-- Export Section -->
+    <div class="col-lg-6">
+        <div class="card shadow-sm">
+            <div class="card-header bg-white"><strong>📊 匯出保單資料</strong></div>
+            <div class="card-body">
+                <p class="text-muted">將所有保單資料匯出為 Excel 或 CSV 格式，方便存档或報稅用途。</p>
+                <div class="d-flex gap-3 flex-wrap">
+                    <button class="btn btn-success" onclick="exportExcel()">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="me-1" viewBox="0 0 16 16"><path d="M.5 9.9a.5.5 0 0 1 .5.5v2.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-2.5a.5.5 0 0 1 1 0v2.5a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2v-2.5a.5.5 0 0 1 .5-.5z"/><path d="M7.646 11.854a.5.5 0 0 0 .708 0l3-3a.5.5 0 0 0-.708-.708L8.5 10.293V1.5a.5.5 0 0 0-1 0v8.793L5.354 8.146a.5.5 0 1 0-.708.708l3 3z"/></svg>
+                        匯出 Excel (.xlsx)
+                    </button>
+                    <button class="btn btn-outline-secondary" onclick="exportCSV()">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="me-1" viewBox="0 0 16 16"><path d="M.5 9.9a.5.5 0 0 1 .5.5v2.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-2.5a.5.5 0 0 1 1 0v2.5a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2v-2.5a.5.5 0 0 1 .5-.5z"/><path d="M7.646 11.854a.5.5 0 0 0 .708 0l3-3a.5.5 0 0 0-.708-.708L8.5 10.293V1.5a.5.5 0 0 0-1 0v8.793L5.354 8.146a.5.5 0 1 0-.708.708l3 3z"/></svg>
+                        匯出 CSV (.csv)
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- iCloud Backup -->
+    <div class="col-lg-6">
+        <div class="card shadow-sm">
+            <div class="card-header bg-white"><strong>☁️ iCloud 自動備份</strong></div>
+            <div class="card-body">
+                <p class="text-muted">資料庫每6小時自動同步至 iCloud Drive，確保資料安全。</p>
+                <div class="mb-3">
+                    {% if backup_status.last_backup %}
+                    <div class="text-success mb-2">✅ 上次備份時間：{{ backup_status.last_backup }}</div>
+                    {% else %}
+                    <div class="text-warning mb-2">⚠️ 尚未進行過備份</div>
+                    {% endif %}
+                    <div class="text-muted small">iCloud 路徑：~/Library/Mobile Documents/com~apple~CloudDocs/InsuranceCRM/insurance.db</div>
+                </div>
+                <button class="btn btn-primary" onclick="manualBackup()">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="me-1" viewBox="0 0 16 16"><path d="M8 3.5a.5.5 0 0 0-1 0V9a.5.5 0 0 0 .252.434l3.5 2a.5.5 0 0 0 .496-.868L8 8.71V3.5z"/><path d="M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16zm7-8A7 7 0 1 1 1 8a7 7 0 0 1 14 0z"/></svg>
+                    立即備份
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function exportExcel() {
+    showLoading();
+    try {
+        const res = await axios.post('/api/export/excel', {}, { responseType: 'blob' });
+        const url = URL.createObjectURL(res.data);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = '保單列表.xlsx';
+        a.click();
+        URL.revokeObjectURL(url);
+    } catch(e) { alert('匯出失敗'); }
+    finally { hideLoading(); }
+}
+
+async function exportCSV() {
+    showLoading();
+    try {
+        const res = await axios.post('/api/export/csv', {}, { responseType: 'blob' });
+        const url = URL.createObjectURL(res.data);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = '保單列表.csv';
+        a.click();
+        URL.revokeObjectURL(url);
+    } catch(e) { alert('匯出失敗'); }
+    finally { hideLoading(); }
+}
+
+async function manualBackup() {
+    showLoading();
+    try {
+        await axios.post('/api/backup/now');
+        location.reload();
+    } catch(e) { alert('備份失敗'); }
+    finally { hideLoading(); }
+}
+
+function showLoading() { document.getElementById('loadingOverlay').style.display='flex'; }
+function hideLoading() { document.getElementById('loadingOverlay').style.display='none'; }
+</script>
+{% endblock %}

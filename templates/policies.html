@@ -1,0 +1,450 @@
+{% extends "base.html" %}
+{% block title %}保單管理 - 保險客戶管理系統{% endblock %}
+{% block content %}
+<h2 class="mb-4 fw-bold">📋 保單管理</h2>
+
+
+<div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+    <div class="d-flex gap-2">
+        <select class="form-select" id="filterStatus" onchange="applyFilters()" style="width:auto">
+            <option value="">全部狀態</option>
+            <option value="active">生效中</option>
+            <option value="expired">已過期</option>
+            <option value="cancelled">已取消</option>
+            <option value="renewed">已續保</option>
+        </select>
+        <input type="text" id="filterPlate" class="form-control" placeholder="搜尋車牌..." oninput="applyFilters()" style="width:160px">
+    </div>
+    <button class="btn btn-primary" onclick="openAddModal()">+ 新增保單</button>
+</div>
+
+<div class="card shadow-sm">
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-hover mb-0">
+                <thead class="table-light">
+                    <tr>
+                        <th>車牌</th>
+                        <th>客戶</th>
+                        <th>險種</th>
+                        <th>保額</th>
+                        <th>保費</th>
+                        <th>起始日</th>
+                        <th>到期日</th>
+                        <th>狀態</th>
+                        <th>操作</th>
+                    </tr>
+                </thead>
+                <tbody id="policyBody">
+                    {% for p in policies %}
+                    <tr data-id="{{ p.id }}" data-cid="{{ p.customer_id }}"
+                        data-plate="{{ p.license_plate }}" data-type="{{ p.policy_type }}"
+                        data-coverage="{{ p.coverage_amount }}" data-premium="{{ p.premium }}"
+                        data-start="{{ p.start_date }}" data-expiry="{{ p.expiry_date }}"
+                        data-status="{{ p.status }}" data-notes="{{ p.notes }}"
+                        data-ins="{{ p.insurance_company or '' }}" data-policynum="{{ p.policy_number or '' }}"
+                        data-agency="{{ p.agency_company or '' }}" data-ncbncd="{{ p.ncb_ncd or '' }}"
+                        data-vehiclemodel="{{ p.vehicle_model or '' }}" data-vehicleyear="{{ p.vehicle_year or '' }}"
+                        data-excess="{{ p.excess_info or '' }}"
+                        data-excessyoung="{{ p.excess_young or '' }}" data-excessinex="{{ p.excess_inexperienced or '' }}"
+                        data-excessunnamed="{{ p.excess_unnamed or '' }}" data-excesstppd="{{ p.excess_tppd or '' }}"
+                        data-excessparking="{{ p.excess_parking or '' }}" data-excesstheft="{{ p.excess_theft or '' }}"
+                        data-excesswindscreen="{{ p.excess_windscreen or '' }}" data-excessauthrepair="{{ p.excess_authorised_repair or '' }}"
+                        data-custphone="{{ p.customer_phone or '' }}" data-custemail="{{ p.customer_email or '' }}" data-custaddr="{{ p.customer_address or '' }}">
+                        <td><span class="badge bg-dark">{{ p.license_plate }}</span></td>
+                        <td>{{ p.customer_name }}</td>
+                        <td>{{ p.policy_type }}</td>
+                        <td>${{ "{:,.0f}".format(p.coverage_amount) }}</td>
+                        <td>${{ "{:,.0f}".format(p.premium) }}</td>
+                        <td>{{ p.start_date }}</td>
+                        <td>{{ p.expiry_date }}</td>
+                        <td>
+                            {% if p.status == 'active' %}
+                            <span class="badge bg-success">生效中</span>
+                            {% elif p.status == 'expired' %}
+                            <span class="badge bg-danger">已過期</span>
+                            {% elif p.status == 'renewed' %}
+                            <span class="badge bg-info">已續保</span>
+                            {% elif p.status == 'contacted' %}
+                            <span class="badge bg-primary">已聯繫</span>
+                            {% elif p.status == 'unreachable' %}
+                            <span class="badge bg-secondary">未能聯絡</span>
+                            {% elif p.status == 'not_renewing' %}
+                            <span class="badge bg-danger">不續保</span>
+                            {% else %}
+                            <span class="badge bg-secondary">{{ p.status }}</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            <button class="btn btn-sm btn-outline-success me-1" onclick='renewPolicy({{ p.id }})'>續保</button>
+                            <button class="btn btn-sm btn-outline-warning me-1" onclick='editPolicy({{ p.id }})'>編輯</button>
+                            <button class="btn btn-sm btn-outline-danger" onclick='deletePolicy({{ p.id }})'>刪除</button>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<!-- Add/Edit Modal -->
+<div class="modal fade" id="policyModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="modalTitle">新增保單</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="editId">
+                <div class="row g-3">
+                    <div class="col-md-6">
+                        <label class="form-label">客戶 *</label>
+                        <select class="form-select" id="inputCustomer" required>
+                            <option value="">選擇客戶</option>
+                            {% for c in customers %}
+                            <option value="{{ c.id }}">{{ c.name }} ({{ c.phone }})</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">客戶電話</label>
+                        <input type="text" class="form-control" id="inputCustomerPhone" placeholder="電話">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">客戶電郵</label>
+                        <input type="email" class="form-control" id="inputCustomerEmail" placeholder="電郵">
+                    </div>
+                    <div class="col-md-8">
+                        <label class="form-label">客戶地址</label>
+                        <textarea class="form-control" id="inputCustomerAddress" rows="2" placeholder="地址"></textarea>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">車牌</label>
+                        <input type="text" class="form-control" id="inputPlate" placeholder="如：粵Z1234">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">險種</label>
+                        <select class="form-select" id="inputType">
+                            <option value="港車北上">港車北上</option>
+                            <option value="第三者責任">第三者責任</option>
+                            <option value="全保">全保</option>
+                        </select>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">保險公司</label>
+                        <input type="text" class="form-control" id="inputInsuranceCompany" placeholder="如：Well Link">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">保單號碼</label>
+                        <input type="text" class="form-control" id="inputPolicyNumber" placeholder="如：U6VPO000027922026/02">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">中介公司</label>
+                        <input type="text" class="form-control" id="inputAgencyCompany" placeholder="如：Progress Insurance">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">NCB/NCD (無索償折扣)</label>
+                        <input type="text" class="form-control" id="inputNcbNcd" placeholder="如：60%">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">車輛型號</label>
+                        <input type="text" class="form-control" id="inputVehicleModel" placeholder="如：Tesla MODEL S 85 KWH">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">車輛年份</label>
+                        <input type="text" class="form-control" id="inputVehicleYear" placeholder="如：2015">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">保額 (港幣)</label>
+                        <input type="number" class="form-control" id="inputCoverage" value="0">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">保費 (港幣)</label>
+                        <input type="number" class="form-control" id="inputPremium" value="0">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">狀態</label>
+                        <select class="form-select" id="inputStatus">
+                            <option value="active">生效中 (Inforce)</option>
+                            <option value="expired">已過期 (Expired)</option>
+                            <option value="cancelled">已取消 (Cancelled)</option>
+                            <option value="discontinued">已斷保 (Discontinued)</option>
+                            <option value="lapsed">失效 (Lapsed)</option>
+                            <option value="not_renewing">不續保 (Not Renewing)</option>
+                        </select>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">起始日</label>
+                        <input type="date" class="form-control" id="inputStart">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">到期日</label>
+                        <input type="date" class="form-control" id="inputExpiry">
+                    </div>
+                </div>
+                <div class="row g-3 mt-2">
+                    <div class="col-md-6">
+                        <label class="form-label">墊底費 (EXCESS) 摘要</label>
+                        <input type="text" class="form-control" id="inputExcessInfo" placeholder="如：TPPD 25,000">
+                    </div>
+                </div>
+                <hr>
+                <h6 class="mb-2">墊底費 (EXCESS) 詳情</h6>
+                <div class="row g-3">
+                    <div class="col-md-3">
+                        <label class="form-label small text-muted">General (一般)</label>
+                        <input type="text" class="form-control" id="inputExcessInfo" placeholder="如：10,000">
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label small text-muted">Young Driver (&lt;25歲)</label>
+                        <input type="text" class="form-control" id="inputExcessYoung" placeholder="如：10,000">
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label small text-muted">Inexperienced (&lt;2年經驗)</label>
+                        <input type="text" class="form-control" id="inputExcessInexperienced" placeholder="如：10,000">
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label small text-muted">Unnamed Driver</label>
+                        <input type="text" class="form-control" id="inputExcessUnnamed" placeholder="如：20,000">
+                    </div>
+                </div>
+                <div class="row g-3 mt-2">
+                    <div class="col-md-3">
+                        <label class="form-label small text-muted">TPPD (第三者責任)</label>
+                        <input type="text" class="form-control" id="inputExcessTppd" placeholder="如：10,000">
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label small text-muted">Parking Damage</label>
+                        <input type="text" class="form-control" id="inputExcessParking" placeholder="如：2,000">
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label small text-muted">Theft Loss</label>
+                        <input type="text" class="form-control" id="inputExcessTheft" placeholder="如：5,000">
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label small text-muted">Windscreen</label>
+                        <input type="text" class="form-control" id="inputExcessWindscreen" placeholder="如：10,000">
+                    </div>
+                </div>
+                <div class="row g-3 mt-2">
+                    <div class="col-md-3">
+                        <label class="form-label small text-muted">Authorised Repair Limit</label>
+                        <input type="text" class="form-control" id="inputExcessAuthorisedRepair" placeholder="如：1,000">
+                    </div>
+                </div>
+                <hr>
+                <div class="row g-3 mt-2">
+                    <div class="col-12">
+                        <label class="form-label">備註</label>
+                        <textarea class="form-control" id="inputNotes" rows="2"></textarea>
+                    </div>
+                </div>
+            </div>
+            <div style="background:orange;padding:10px;margin-top:10px;border-top:1px solid #ddd;">
+                <button onclick="const id=document.getElementById('editId').value; const status=document.getElementById('inputStatus').value; const formData=new URLSearchParams(); formData.append('customer_id', document.getElementById('inputCustomer').value); formData.append('license_plate', document.getElementById('inputPlate').value); formData.append('policy_type', document.getElementById('inputType').value); formData.append('status', status); formData.append('coverage_amount', document.getElementById('inputCoverage').value||0); formData.append('premium', document.getElementById('inputPremium').value||0); formData.append('start_date', document.getElementById('inputStart').value); formData.append('expiry_date', document.getElementById('inputExpiry').value); axios.put('/api/policies/'+id, formData.toString(), {headers:{'Content-Type':'application/x-www-form-urlencoded'}}).then(r=>{location.reload();}).catch(e=>alert('失敗：'+e.message));" class="btn btn-primary">💾 儲存</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Confirm Delete Modal -->
+<div class="modal fade" id="confirmModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title text-danger">⚠️ 確認刪除</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">確定要刪除此保單嗎？此操作無法撤銷。</div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-danger" id="confirmDeleteBtn">確認刪除</button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let modal, confirmModal;
+document.addEventListener('DOMContentLoaded', () => {
+    modal = new bootstrap.Modal(document.getElementById('policyModal'));
+    confirmModal = new bootstrap.Modal(document.getElementById('confirmModal'));
+});
+
+function openAddModal() {
+    document.getElementById('modalTitle').textContent = '新增保單';
+    document.getElementById('editId').value = '';
+    document.getElementById('inputCustomer').value = '';
+    document.getElementById('inputCustomerPhone').value = '';
+    document.getElementById('inputCustomerEmail').value = '';
+    document.getElementById('inputCustomerAddress').value = '';
+    document.getElementById('inputPlate').value = '';
+    document.getElementById('inputType').value = '港車北上';
+    document.getElementById('inputInsuranceCompany').value = '';
+    document.getElementById('inputPolicyNumber').value = '';
+    document.getElementById('inputAgencyCompany').value = '';
+    document.getElementById('inputNcbNcd').value = '';
+    document.getElementById('inputVehicleModel').value = '';
+    document.getElementById('inputVehicleYear').value = '';
+    document.getElementById('inputStatus').value = 'active';
+    document.getElementById('inputCoverage').value = '0';
+    document.getElementById('inputPremium').value = '0';
+    document.getElementById('inputStart').value = '';
+    document.getElementById('inputExpiry').value = '';
+    document.getElementById('inputExcessInfo').value = '';
+    document.getElementById('inputExcessYoung').value = '';
+    document.getElementById('inputExcessInexperienced').value = '';
+    document.getElementById('inputExcessUnnamed').value = '';
+    document.getElementById('inputExcessTppd').value = '';
+    document.getElementById('inputExcessParking').value = '';
+    document.getElementById('inputExcessTheft').value = '';
+    document.getElementById('inputExcessWindscreen').value = '';
+    document.getElementById('inputExcessAuthorisedRepair').value = '';
+    document.getElementById('inputNotes').value = '';
+    modal.show();
+}
+
+function renewPolicy(id) {
+    const row = document.querySelector(`tr[data-id="${id}"]`);
+    // Navigate to renewals page with query params to pre-fill
+    const params = new URLSearchParams({
+        original_policy_id: id,
+        customer_id: row.dataset.cid,
+        license_plate: row.dataset.plate,
+        policy_type: row.dataset.type,
+        coverage_amount: row.dataset.coverage,
+        premium: row.dataset.premium,
+        expiry_date: row.dataset.expiry,
+    });
+    window.location.href = '/renewals?prefill=1&' + params.toString();
+}
+
+function editPolicy(id) {
+    try {
+        const row = document.querySelector(`tr[data-id="${id}"]`);
+        if (!row) { alert('找不到保單資料'); return; }
+        document.getElementById('modalTitle').textContent = '編輯保單';
+        document.getElementById('editId').value = id;
+        document.getElementById('inputCustomer').value = row.dataset.cid || '';
+        document.getElementById('inputCustomerPhone').value = row.dataset.custphone || '';
+        document.getElementById('inputCustomerEmail').value = row.dataset.custemail || '';
+        document.getElementById('inputCustomerAddress').value = row.dataset.custaddr || '';
+        document.getElementById('inputPlate').value = row.dataset.plate || '';
+        document.getElementById('inputType').value = row.dataset.type || '港車北上';
+        document.getElementById('inputInsuranceCompany').value = row.dataset.ins || '';
+        document.getElementById('inputPolicyNumber').value = row.dataset.policynum || '';
+        document.getElementById('inputAgencyCompany').value = row.dataset.agency || '';
+        document.getElementById('inputNcbNcd').value = row.dataset.ncbncd || '';
+        document.getElementById('inputVehicleModel').value = row.dataset.vehiclemodel || '';
+        document.getElementById('inputVehicleYear').value = row.dataset.vehicleyear || '';
+        document.getElementById('inputStatus').value = row.dataset.status || 'active';
+        document.getElementById('inputCoverage').value = row.dataset.coverage || '0';
+        document.getElementById('inputPremium').value = row.dataset.premium || '0';
+        document.getElementById('inputStart').value = row.dataset.start || '';
+        document.getElementById('inputExpiry').value = row.dataset.expiry || '';
+        document.getElementById('inputExcessInfo').value = row.dataset.excess || '';
+        document.getElementById('inputExcessYoung').value = row.dataset.excessyoung || '';
+        document.getElementById('inputExcessInexperienced').value = row.dataset.excessinex || '';
+        document.getElementById('inputExcessUnnamed').value = row.dataset.excessunnamed || '';
+        document.getElementById('inputExcessTppd').value = row.dataset.excesstppd || '';
+        document.getElementById('inputExcessParking').value = row.dataset.excessparking || '';
+        document.getElementById('inputExcessTheft').value = row.dataset.excesstheft || '';
+        document.getElementById('inputExcessWindscreen').value = row.dataset.excesswindscreen || '';
+        document.getElementById('inputExcessAuthorisedRepair').value = row.dataset.excessauthrepair || '';
+        document.getElementById('inputNotes').value = row.dataset.notes || '';
+        if (typeof modal !== 'undefined' && modal) {
+            modal.show();
+        } else {
+            alert('Modal 未正確載入，請嘗試刷新頁面');
+        }
+    } catch(e) {
+        console.error('editPolicy error:', e);
+        alert('編輯功能出错: ' + e.message);
+    }
+}
+
+async function savePolicy() {
+    const id = document.getElementById('editId').value;
+    const customer_id = document.getElementById('inputCustomer').value;
+    const status = document.getElementById('inputStatus').value;
+    alert('開始儲存！ID: ' + id + ', 狀態: ' + status);
+    console.log('savePolicy called:', {id, customer_id, status});
+    if (!customer_id) { alert('請選擇客戶'); return; }
+    const data = {
+        customer_id: parseInt(customer_id),
+        license_plate: document.getElementById('inputPlate').value,
+        policy_type: document.getElementById('inputType').value,
+        status: document.getElementById('inputStatus').value,
+        coverage_amount: parseFloat(document.getElementById('inputCoverage').value) || 0,
+        premium: parseFloat(document.getElementById('inputPremium').value) || 0,
+        start_date: document.getElementById('inputStart').value,
+        expiry_date: document.getElementById('inputExpiry').value,
+        notes: document.getElementById('inputNotes').value,
+        insurance_company: document.getElementById('inputInsuranceCompany').value,
+        policy_number: document.getElementById('inputPolicyNumber').value,
+        agency_company: document.getElementById('inputAgencyCompany').value,
+        ncb_ncd: document.getElementById('inputNcbNcd').value,
+        vehicle_model: document.getElementById('inputVehicleModel').value,
+        vehicle_year: document.getElementById('inputVehicleYear').value,
+        excess_info: document.getElementById('inputExcessInfo').value,
+        excess_young: document.getElementById('inputExcessYoung').value,
+        excess_inexperienced: document.getElementById('inputExcessInexperienced').value,
+        excess_unnamed: document.getElementById('inputExcessUnnamed').value,
+        excess_tppd: document.getElementById('inputExcessTppd').value,
+        excess_parking: document.getElementById('inputExcessParking').value,
+        excess_theft: document.getElementById('inputExcessTheft').value,
+        excess_windscreen: document.getElementById('inputExcessWindscreen').value,
+        excess_authorised_repair: document.getElementById('inputExcessAuthorisedRepair').value,
+        // Customer info
+        customer_phone: document.getElementById('inputCustomerPhone').value,
+        customer_email: document.getElementById('inputCustomerEmail').value,
+        customer_address: document.getElementById('inputCustomerAddress').value,
+    };
+    showLoading();
+    try {
+        const formData = new URLSearchParams();
+        for (const key in data) {
+            formData.append(key, data[key]);
+        }
+        if (id) {
+            await axios.put(`/api/policies/${id}`, formData.toString(), { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
+        } else {
+            await axios.post('/api/policies', formData.toString(), { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
+        }
+        location.reload();
+    } catch(e) { alert('儲存失敗: ' + e.message); }
+    finally { hideLoading(); }
+}
+
+let deleteTarget = null;
+function deletePolicy(id) {
+    deleteTarget = id;
+    confirmModal.show();
+}
+document.getElementById('confirmDeleteBtn').onclick = async () => {
+    showLoading();
+    try {
+        await axios.delete(`/api/policies/${deleteTarget}`);
+        location.reload();
+    } catch(e) { alert('刪除失敗'); }
+    finally { hideLoading(); }
+};
+
+function applyFilters() {
+    const status = document.getElementById('filterStatus').value;
+    const plate = document.getElementById('filterPlate').value.toLowerCase();
+    document.querySelectorAll('#policyBody tr').forEach(row => {
+        const matchStatus = !status || row.dataset.status === status;
+        const matchPlate = !plate || row.dataset.plate.toLowerCase().includes(plate);
+        row.style.display = (matchStatus && matchPlate) ? '' : 'none';
+    });
+}
+
+function showLoading() { document.getElementById('loadingOverlay').style.display='flex'; }
+function hideLoading() { document.getElementById('loadingOverlay').style.display='none'; }
+</script>
+{% endblock %}
