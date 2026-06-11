@@ -175,20 +175,12 @@ def get_policies_by_customer(cid):
 
 def get_monthly_stats():
     with get_session() as conn:
-        # Try PostgreSQL first; fall back to SQLite on "no such function" error
-        try:
-            rows = conn.execute(text(
-                "SELECT TO_CHAR(start_date, 'YYYY-MM') as month, COUNT(*) as count, SUM(premium) as total "
-                "FROM policies WHERE start_date IS NOT NULL AND start_date != '' "
-                "GROUP BY month ORDER BY month DESC LIMIT 12"
-            )).fetchall()
-        except Exception:
-            # PostgreSQL syntax failed — try SQLite
-            rows = conn.execute(text(
-                "SELECT strftime('%Y-%m', start_date) as month, COUNT(*) as count, SUM(premium) as total "
-                "FROM policies WHERE start_date IS NOT NULL AND start_date != '' "
-                "GROUP BY month ORDER BY month DESC LIMIT 12"
-            )).fetchall()
+        # Use strftime for cross-database compatibility (works for both SQLite TEXT and PostgreSQL DATE)
+        rows = conn.execute(text(
+            "SELECT strftime('%Y-%m', start_date) as month, COUNT(*) as count, SUM(premium) as total "
+            "FROM policies WHERE start_date IS NOT NULL AND start_date != '' AND start_date IS NOT NULL "
+            "GROUP BY month ORDER BY month DESC LIMIT 12"
+        )).fetchall()
         return [{"month": r[0], "count": r[1], "total": float(r[2] or 0)} for r in rows]
 
 def get_type_stats():
