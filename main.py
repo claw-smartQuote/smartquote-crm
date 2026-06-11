@@ -46,8 +46,10 @@ def dashboard(request: Request):
         backup_status = icloud_backup.get_status()
         recent_activity = database.get_recent_activity(15)
     except Exception as e:
-        import traceback
-        return HTMLResponse(f"<pre>Dashboard Error:\n{traceback.format_exc()}</pre>", status_code=500)
+        import traceback, pathlib
+        err = traceback.format_exc()
+        pathlib.Path('/tmp/dash_error.log').write_text(err)
+        return HTMLResponse(f"Dashboard Error (logged):\n{err}", status_code=500)
     return templates.TemplateResponse("dashboard.html", {
         "request": request,
         "stats": stats,
@@ -423,6 +425,22 @@ def api_update_renewal(
 def api_delete_renewal(rid: int):
     database.delete_renewal(rid)
     return {"ok": True}
+
+@app.get("/debug-all")
+def debug_all():
+    import traceback
+    results = {}
+    for name, fn in [
+        ("stats", lambda: database.get_stats()),
+        ("expiring", lambda: database.get_expiring_policies(30)),
+        ("recent_customers", lambda: database.get_recent_customers(5)),
+        ("activity", lambda: database.get_recent_activity(15)),
+    ]:
+        try:
+            results[name] = {"ok": True, "data": fn()}
+        except Exception as e:
+            results[name] = {"ok": False, "error": str(e), "trace": traceback.format_exc()}
+    return results
 
 @app.get("/api/backup/status")
 def api_backup_status():
