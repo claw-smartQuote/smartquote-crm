@@ -10,7 +10,7 @@ from sqlalchemy.pool import NullPool
 
 DATABASE_URL = os.environ.get(
     "DATABASE_URL",
-    "postgresql://smartquote_crm_db_user:***@dpg-d8l5gkv7f7vs73flll2g-a/smartquote_crm_db"
+    "postgresql://smartquote_crm_db_user:AFxhpRnvs6zh1p2OUDs2U8KRuI0f21yx@dpg-d8l5gkv7f7vs73flll2g-a/smartquote_crm_db"
 )
 
 # NullPool required for Render managed Postgres (no SSL toggle)
