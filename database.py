@@ -68,60 +68,118 @@ def get_session():
 
 
 # ── Init DB ─────────────────────────────────────────────────────────────────
+_PG_CREATE_TABLES = """
+CREATE TABLE IF NOT EXISTS customers (
+    id SERIAL PRIMARY KEY,
+    name TEXT NOT NULL, phone TEXT, email TEXT,
+    is_potential INTEGER DEFAULT 0, address TEXT,
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW());
+CREATE TABLE IF NOT EXISTS policies (
+    id SERIAL PRIMARY KEY,
+    customer_id INTEGER NOT NULL, license_plate TEXT, policy_type TEXT,
+    coverage_amount DOUBLE PRECISION, premium DOUBLE PRECISION, start_date DATE, expiry_date DATE,
+    status TEXT DEFAULT 'active', notes TEXT, from_renewal INTEGER DEFAULT 0,
+    insurance_company TEXT DEFAULT '', policy_number TEXT DEFAULT '',
+    agency_company TEXT DEFAULT '', vehicle_model TEXT DEFAULT '',
+    vehicle_year TEXT DEFAULT '', excess_info TEXT DEFAULT '',
+    ncb_ncd TEXT DEFAULT '', excess_young TEXT DEFAULT '',
+    excess_inexperienced TEXT DEFAULT '', excess_unnamed TEXT DEFAULT '',
+    excess_tppd TEXT DEFAULT '', excess_parking TEXT DEFAULT '',
+    excess_theft TEXT DEFAULT '', excess_windscreen TEXT DEFAULT '',
+    excess_authorised_repair TEXT DEFAULT '',
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW(),
+    FOREIGN KEY (customer_id) REFERENCES customers(id) ON DELETE CASCADE);
+CREATE TABLE IF NOT EXISTS coverages (
+    id SERIAL PRIMARY KEY,
+    policy_id INTEGER NOT NULL, coverage_name TEXT,
+    coverage_amount DOUBLE PRECISION, premium DOUBLE PRECISION, notes TEXT,
+    FOREIGN KEY (policy_id) REFERENCES policies(id) ON DELETE CASCADE);
+CREATE TABLE IF NOT EXISTS renewals (
+    id SERIAL PRIMARY KEY,
+    original_policy_id INTEGER, new_policy_id INTEGER,
+    customer_id INTEGER NOT NULL, license_plate TEXT,
+    insurance_company TEXT, policy_type TEXT,
+    coverage_amount DOUBLE PRECISION, premium DOUBLE PRECISION,
+    effective_date DATE, expiry_date DATE,
+    renewal_date DATE DEFAULT CURRENT_DATE,
+    status TEXT DEFAULT 'pending', notes TEXT,
+    agent_person TEXT DEFAULT '', policy_number TEXT DEFAULT '',
+    vehicle_model TEXT DEFAULT '', phone TEXT DEFAULT '',
+    created_at TIMESTAMP DEFAULT NOW(),
+    FOREIGN KEY (original_policy_id) REFERENCES policies(id) ON DELETE SET NULL,
+    FOREIGN KEY (new_policy_id) REFERENCES policies(id) ON DELETE SET NULL,
+    FOREIGN KEY (customer_id) REFERENCES customers(id) ON DELETE CASCADE);
+CREATE TABLE IF NOT EXISTS activity_log (
+    id SERIAL PRIMARY KEY,
+    action TEXT NOT NULL, entity_type TEXT NOT NULL,
+    entity_id INTEGER, description TEXT, details TEXT,
+    created_at TIMESTAMP DEFAULT NOW());
+"""
+
+_SQLITE_CREATE_TABLES = """
+CREATE TABLE IF NOT EXISTS customers (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL, phone TEXT, email TEXT,
+        is_potential INTEGER DEFAULT 0, address TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
+    CREATE TABLE IF NOT EXISTS policies (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        customer_id INTEGER NOT NULL, license_plate TEXT, policy_type TEXT,
+        coverage_amount REAL, premium REAL, start_date DATE, expiry_date DATE,
+        status TEXT DEFAULT 'active', notes TEXT, from_renewal INTEGER DEFAULT 0,
+        insurance_company TEXT DEFAULT '', policy_number TEXT DEFAULT '',
+        agency_company TEXT DEFAULT '', vehicle_model TEXT DEFAULT '',
+        vehicle_year TEXT DEFAULT '', excess_info TEXT DEFAULT '',
+        ncb_ncd TEXT DEFAULT '', excess_young TEXT DEFAULT '',
+        excess_inexperienced TEXT DEFAULT '', excess_unnamed TEXT DEFAULT '',
+        excess_tppd TEXT DEFAULT '', excess_parking TEXT DEFAULT '',
+        excess_theft TEXT DEFAULT '', excess_windscreen TEXT DEFAULT '',
+        excess_authorised_repair TEXT DEFAULT '',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (customer_id) REFERENCES customers(id) ON DELETE CASCADE);
+    CREATE TABLE IF NOT EXISTS coverages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        policy_id INTEGER NOT NULL, coverage_name TEXT,
+        coverage_amount REAL, premium REAL, notes TEXT,
+        FOREIGN KEY (policy_id) REFERENCES policies(id) ON DELETE CASCADE);
+    CREATE TABLE IF NOT EXISTS renewals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        original_policy_id INTEGER, new_policy_id INTEGER,
+        customer_id INTEGER NOT NULL, license_plate TEXT,
+        insurance_company TEXT, policy_type TEXT,
+        coverage_amount REAL, premium REAL,
+        effective_date DATE, expiry_date DATE,
+        renewal_date DATE DEFAULT (date('now')),
+        status TEXT DEFAULT 'pending', notes TEXT,
+        agent_person TEXT DEFAULT '', policy_number TEXT DEFAULT '',
+        vehicle_model TEXT DEFAULT '', phone TEXT DEFAULT '',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (original_policy_id) REFERENCES policies(id) ON DELETE SET NULL,
+        FOREIGN KEY (new_policy_id) REFERENCES policies(id) ON DELETE SET NULL,
+        FOREIGN KEY (customer_id) REFERENCES customers(id) ON DELETE CASCADE);
+    CREATE TABLE IF NOT EXISTS activity_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        action TEXT NOT NULL, entity_type TEXT NOT NULL,
+        entity_id INTEGER, description TEXT, details TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
+"""
+
 def init_db():
     if _is_postgres:
-        return  # PostgreSQL tables already exist
+        with get_session() as conn:
+            for stmt in _PG_CREATE_TABLES.strip().split(';'):
+                stmt = stmt.strip()
+                if stmt:
+                    conn.execute(text(stmt))
+            conn.commit()
+        return
     conn = _get_sqlite_conn()
     cur = conn.cursor()
-    cur.executescript("""
-        CREATE TABLE IF NOT EXISTS customers (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL, phone TEXT, email TEXT,
-                is_potential INTEGER DEFAULT 0, address TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
-            CREATE TABLE IF NOT EXISTS policies (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                customer_id INTEGER NOT NULL, license_plate TEXT, policy_type TEXT,
-                coverage_amount REAL, premium REAL, start_date DATE, expiry_date DATE,
-                status TEXT DEFAULT 'active', notes TEXT, from_renewal INTEGER DEFAULT 0,
-                insurance_company TEXT DEFAULT '', policy_number TEXT DEFAULT '',
-                agency_company TEXT DEFAULT '', vehicle_model TEXT DEFAULT '',
-                vehicle_year TEXT DEFAULT '', excess_info TEXT DEFAULT '',
-                ncb_ncd TEXT DEFAULT '', excess_young TEXT DEFAULT '',
-                excess_inexperienced TEXT DEFAULT '', excess_unnamed TEXT DEFAULT '',
-                excess_tppd TEXT DEFAULT '', excess_parking TEXT DEFAULT '',
-                excess_theft TEXT DEFAULT '', excess_windscreen TEXT DEFAULT '',
-                excess_authorised_repair TEXT DEFAULT '',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (customer_id) REFERENCES customers(id) ON DELETE CASCADE);
-            CREATE TABLE IF NOT EXISTS coverages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                policy_id INTEGER NOT NULL, coverage_name TEXT,
-                coverage_amount REAL, premium REAL, notes TEXT,
-                FOREIGN KEY (policy_id) REFERENCES policies(id) ON DELETE CASCADE);
-            CREATE TABLE IF NOT EXISTS renewals (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                original_policy_id INTEGER, new_policy_id INTEGER,
-                customer_id INTEGER NOT NULL, license_plate TEXT,
-                insurance_company TEXT, policy_type TEXT,
-                coverage_amount REAL, premium REAL,
-                effective_date DATE, expiry_date DATE,
-                renewal_date DATE DEFAULT (date('now')),
-                status TEXT DEFAULT 'pending', notes TEXT,
-                agent_person TEXT DEFAULT '', policy_number TEXT DEFAULT '',
-                vehicle_model TEXT DEFAULT '', phone TEXT DEFAULT '',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (original_policy_id) REFERENCES policies(id) ON DELETE SET NULL,
-                FOREIGN KEY (new_policy_id) REFERENCES policies(id) ON DELETE SET NULL,
-                FOREIGN KEY (customer_id) REFERENCES customers(id) ON DELETE CASCADE);
-            CREATE TABLE IF NOT EXISTS activity_log (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                action TEXT NOT NULL, entity_type TEXT NOT NULL,
-                entity_id INTEGER, description TEXT, details TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
-        """)
+    cur.executescript(_SQLITE_CREATE_TABLES)
     conn.commit()
     conn.close()
 
