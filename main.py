@@ -50,14 +50,18 @@ def dashboard(request: Request):
         err = traceback.format_exc()
         pathlib.Path('/tmp/dash_error.log').write_text(err)
         return HTMLResponse(f"Dashboard Error (logged):\n{err}", status_code=500)
-    return templates.TemplateResponse("dashboard.html", {
-        "request": request,
-        "stats": stats,
-        "expiring": expiring,
-        "recent_customers": recent_customers,
-        "backup_status": backup_status,
-        "recent_activity": recent_activity,
-    })
+    try:
+        return templates.TemplateResponse("dashboard.html", {
+            "request": request,
+            "stats": stats,
+            "expiring": expiring,
+            "recent_customers": recent_customers,
+            "backup_status": backup_status,
+            "recent_activity": recent_activity,
+        })
+    except Exception as e:
+        import traceback
+        return HTMLResponse(f"<pre>Template Error:\n{traceback.format_exc()}\n\nContext:\nstats={stats}\nexpiring={expiring}\n</pre>", status_code=500)
 
 @app.get("/customers", response_class=HTMLResponse)
 def customers_page(request: Request):
