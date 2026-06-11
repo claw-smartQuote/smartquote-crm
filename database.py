@@ -11,7 +11,7 @@ from sqlalchemy.pool import NullPool
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
 # NullPool required for Render managed Postgres (no SSL toggle)
-if DATABASE_URL.startswith("postgres://"):
+if DATABASE_URL.startswith(("postgres://", "postgresql://")):
     engine = create_engine(DATABASE_URL, poolclass=NullPool)
 else:
     # Local SQLite fallback — use SQLAlchemy so text() works uniformly
