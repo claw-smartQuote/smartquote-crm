@@ -39,8 +39,14 @@ def health_check():
 
 @app.on_event("startup")
 def startup():
-    database.init_db()
-    database.init_sample_data()
+    try:
+        database.init_db()
+    except Exception as e:
+        print(f"[startup] init_db error: {e}")
+    try:
+        database.init_sample_data()
+    except Exception as e:
+        print(f"[startup] init_sample_data error: {e}")
     if os.environ.get("ICLOUD_BACKUP_ENABLED", "0") == "1":
         icloud_backup.start_auto_backup(6)
 
