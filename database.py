@@ -14,13 +14,13 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "")
 if DATABASE_URL.startswith("postgres://"):
     engine = create_engine(DATABASE_URL, poolclass=NullPool)
 else:
-    # Local SQLite fallback
+    # Local SQLite fallback — use SQLAlchemy so text() works uniformly
     import sqlite3
     from pathlib import Path
     DB_PATH = Path(__file__).parent / "insurance.db"
-    engine = None  # handled separately below
+    engine = create_engine(f"sqlite:///{DB_PATH}", connect_args={"check_same_thread": False})
 
-SessionLocal = sessionmaker()
+SessionLocal = sessionmaker(bind=engine)
 
 Base = declarative_base()
 
@@ -198,6 +198,9 @@ def get_stats():
             total_premium = conn.execute(text(
                 "SELECT COALESCE(SUM(premium),0) FROM policies WHERE COALESCE(from_renewal,0)=0 AND status NOT IN ('expired','cancelled','discontinued','lapsed','not_renewing')"
             )).fetchone()[0]
+            potential_count = conn.execute(text(
+                "SELECT COUNT(*) FROM customers WHERE is_potential=1"
+            )).fetchone()[0]
         else:
             total_policies = conn.execute(text(
                 "SELECT COUNT(*) FROM policies WHERE COALESCE(from_renewal,0)=0 AND status NOT IN ('expired','cancelled','discontinued','lapsed','not_renewing')"
@@ -211,11 +214,15 @@ def get_stats():
             total_premium = conn.execute(text(
                 "SELECT COALESCE(SUM(premium),0) FROM policies WHERE COALESCE(from_renewal,0)=0 AND status NOT IN ('expired','cancelled','discontinued','lapsed','not_renewing')"
             )).fetchone()[0]
+            potential_count = conn.execute(text(
+                "SELECT COUNT(*) FROM customers WHERE is_potential=1"
+            )).fetchone()[0]
         return {
             "total_policies": total_policies or 0,
             "total_customers": total_customers or 0,
             "pending_renewals": pending_renewals or 0,
             "total_premium": float(total_premium or 0),
+            "potential_count": potential_count or 0,
         }
 
 def get_recent_customers(limit=5):
@@ -469,7 +476,7 @@ def get_expiring_policies(days=30):
         rows = conn.execute(text("""
             SELECT p.*, c.name as customer_name
             FROM policies p LEFT JOIN customers c ON p.customer_id=c.id
-            WHERE p.expiry_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '1 day' * :days
+            WHERE date(p.expiry_date) BETWEEN date('now') AND date('now', '+' || :days || ' days')
               AND p.status='active'
             ORDER BY p.expiry_date ASC
         """), {"days": days}).fetchall()
