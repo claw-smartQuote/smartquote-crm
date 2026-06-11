@@ -39,13 +39,22 @@ def startup():
 # ── Pages ───────────────────────────────────────────────────────────────────
 @app.get("/", response_class=HTMLResponse)
 def dashboard(request: Request):
+    try:
+        stats = database.get_stats()
+        expiring = database.get_expiring_policies(30)
+        recent_customers = database.get_recent_customers(5)
+        backup_status = icloud_backup.get_status()
+        recent_activity = database.get_recent_activity(15)
+    except Exception as e:
+        import traceback
+        return HTMLResponse(f"<pre>Dashboard Error:\n{traceback.format_exc()}</pre>", status_code=500)
     return templates.TemplateResponse("dashboard.html", {
         "request": request,
-        "stats": database.get_stats(),
-        "expiring": database.get_expiring_policies(30),
-        "recent_customers": database.get_recent_customers(5),
-        "backup_status": icloud_backup.get_status(),
-        "recent_activity": database.get_recent_activity(15),
+        "stats": stats,
+        "expiring": expiring,
+        "recent_customers": recent_customers,
+        "backup_status": backup_status,
+        "recent_activity": recent_activity,
     })
 
 @app.get("/customers", response_class=HTMLResponse)
