@@ -22,7 +22,8 @@ STATIC_DIR.mkdir(exist_ok=True)
 TEMPLATES_DIR.mkdir(exist_ok=True)
 
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
-templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+templates = Jinja2Templates(directory=str(TEMPLATES_DIR), auto_reload=True)
+templates.env.cache = {}
 
 # ── Init ─────────────────────────────────────────────────────────────────────
 @app.get("/health")
