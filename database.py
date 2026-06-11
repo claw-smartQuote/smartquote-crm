@@ -361,7 +361,7 @@ def get_all_policies(include_renewal=False):
                        c.email as customer_email, c.address as customer_address
                 FROM policies p LEFT JOIN customers c ON p.customer_id=c.id
                 WHERE p.status NOT IN ('expired','cancelled','discontinued','lapsed','not_renewing')
-                  AND (p.expiry_date >= CURRENT_DATE OR p.expiry_date IS NULL OR p.expiry_date='')
+                  AND (p.expiry_date >= CURRENT_DATE OR p.expiry_date IS NULL)
                 ORDER BY p.created_at DESC
             """)).fetchall()
         else:
@@ -371,7 +371,7 @@ def get_all_policies(include_renewal=False):
                 FROM policies p LEFT JOIN customers c ON p.customer_id=c.id
                 WHERE COALESCE(p.from_renewal,0)=0
                   AND p.status NOT IN ('expired','cancelled','discontinued','lapsed','not_renewing')
-                  AND (p.expiry_date >= CURRENT_DATE OR p.expiry_date IS NULL OR p.expiry_date='')
+                  AND (p.expiry_date >= CURRENT_DATE OR p.expiry_date IS NULL)
                 ORDER BY p.created_at DESC
             """)).fetchall()
         return [row_to_dict(r) for r in rows]
@@ -383,7 +383,7 @@ def get_lapsed_policies():
                    c.email as customer_email, c.address as customer_address
             FROM policies p LEFT JOIN customers c ON p.customer_id=c.id
             WHERE p.status IN ('expired','cancelled','discontinued','lapsed','not_renewing')
-               OR (p.expiry_date < CURRENT_DATE AND p.expiry_date IS NOT NULL AND p.expiry_date!='')
+               OR (p.expiry_date < CURRENT_DATE AND p.expiry_date IS NOT NULL)
             ORDER BY p.expiry_date DESC
         """)).fetchall()
         return [row_to_dict(r) for r in rows]
