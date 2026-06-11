@@ -241,8 +241,16 @@ def get_policies_by_customer(cid):
 
 def get_monthly_stats():
     with get_session() as conn:
+        if engine is None:
+            # SQLite
+            date_expr = "strftime('%Y-%m', start_date)"
+        else:
+            # PostgreSQL
+            date_expr = "TO_CHAR(start_date, 'YYYY-MM')"
         rows = conn.execute(text(
-            "SELECT strftime('%Y-%m', start_date) as month, COUNT(*) as count, SUM(premium) as total FROM policies WHERE start_date IS NOT NULL AND start_date != '' GROUP BY month ORDER BY month DESC LIMIT 12"
+            f"SELECT {date_expr} as month, COUNT(*) as count, SUM(premium) as total "
+            "FROM policies WHERE start_date IS NOT NULL AND start_date != '' "
+            "GROUP BY month ORDER BY month DESC LIMIT 12"
         )).fetchall()
         return [{"month": r[0], "count": r[1], "total": float(r[2] or 0)} for r in rows]
 
