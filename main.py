@@ -437,3 +437,19 @@ def api_backup_status():
 def api_backup_now():
     ok, result = icloud_backup.backup_now()
     return {"ok": ok, "result": result}
+
+@app.get("/debug-reports")
+def debug_reports():
+    import traceback
+    results = {}
+    for name, fn in [
+        ("monthly", lambda: database.get_monthly_stats()),
+        ("type_stats", lambda: database.get_type_stats()),
+        ("status_stats", lambda: database.get_status_stats()),
+        ("pending_stats", lambda: database.get_pending_renewal_stats()),
+    ]:
+        try:
+            results[name] = {"ok": True, "data": fn()}
+        except Exception as e:
+            results[name] = {"ok": False, "error": str(e), "trace": traceback.format_exc()}
+    return results
