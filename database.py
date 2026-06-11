@@ -69,11 +69,13 @@ def get_session():
 
 # ── Init DB ─────────────────────────────────────────────────────────────────
 def init_db():
-    if engine is None:
-        conn = _get_sqlite_conn()
-        cur = conn.cursor()
-        cur.executescript("""
-            CREATE TABLE IF NOT EXISTS customers (
+    import os
+    if os.environ.get("DATABASE_URL", "").startswith("postgresql"):
+        return  # PostgreSQL tables already exist
+    conn = _get_sqlite_conn()
+    cur = conn.cursor()
+    cur.executescript("""
+        CREATE TABLE IF NOT EXISTS customers (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL, phone TEXT, email TEXT,
                 is_potential INTEGER DEFAULT 0, address TEXT,
@@ -123,100 +125,26 @@ def init_db():
         """)
         conn.commit()
         conn.close()
-    else:
-        with engine.connect() as conn:
-            conn.execute(text("""
-                CREATE TABLE IF NOT EXISTS customers (
-                    id SERIAL PRIMARY KEY, name TEXT NOT NULL, phone TEXT, email TEXT,
-                    is_potential INTEGER DEFAULT 0, address TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)
-            """))
-            conn.execute(text("""
-                CREATE TABLE IF NOT EXISTS policies (
-                    id SERIAL PRIMARY KEY, customer_id INTEGER NOT NULL,
-                    license_plate TEXT, policy_type TEXT, coverage_amount REAL,
-                    premium REAL, start_date DATE, expiry_date DATE,
-                    status TEXT DEFAULT 'active', notes TEXT, from_renewal INTEGER DEFAULT 0,
-                    insurance_company TEXT DEFAULT '', policy_number TEXT DEFAULT '',
-                    agency_company TEXT DEFAULT '', vehicle_model TEXT DEFAULT '',
-                    vehicle_year TEXT DEFAULT '', excess_info TEXT DEFAULT '',
-                    ncb_ncd TEXT DEFAULT '', excess_young TEXT DEFAULT '',
-                    excess_inexperienced TEXT DEFAULT '', excess_unnamed TEXT DEFAULT '',
-                    excess_tppd TEXT DEFAULT '', excess_parking TEXT DEFAULT '',
-                    excess_theft TEXT DEFAULT '', excess_windscreen TEXT DEFAULT '',
-                    excess_authorised_repair TEXT DEFAULT '',
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (customer_id) REFERENCES customers(id) ON DELETE CASCADE)
-            """))
-            conn.execute(text("""
-                CREATE TABLE IF NOT EXISTS coverages (
-                    id SERIAL PRIMARY KEY, policy_id INTEGER NOT NULL,
-                    coverage_name TEXT, coverage_amount REAL, premium REAL, notes TEXT,
-                    FOREIGN KEY (policy_id) REFERENCES policies(id) ON DELETE CASCADE)
-            """))
-            conn.execute(text("""
-                CREATE TABLE IF NOT EXISTS renewals (
-                    id SERIAL PRIMARY KEY, original_policy_id INTEGER, new_policy_id INTEGER,
-                    customer_id INTEGER NOT NULL, license_plate TEXT, insurance_company TEXT,
-                    policy_type TEXT, coverage_amount REAL, premium REAL,
-                    effective_date DATE, expiry_date DATE,
-                    renewal_date DATE DEFAULT CURRENT_DATE,
-                    status TEXT DEFAULT 'pending', notes TEXT,
-                    agent_person TEXT DEFAULT '', policy_number TEXT DEFAULT '',
-                    vehicle_model TEXT DEFAULT '', phone TEXT DEFAULT '',
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (original_policy_id) REFERENCES policies(id) ON DELETE SET NULL,
-                    FOREIGN KEY (new_policy_id) REFERENCES policies(id) ON DELETE SET NULL,
-                    FOREIGN KEY (customer_id) REFERENCES customers(id) ON DELETE CASCADE)
-            """))
-            conn.execute(text("""
-                CREATE TABLE IF NOT EXISTS activity_log (
-                    id SERIAL PRIMARY KEY, action TEXT NOT NULL,
-                    entity_type TEXT NOT NULL, entity_id INTEGER,
-                    description TEXT, details TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)
-            """))
-            conn.commit()
 
 
 # ── Stats / Dashboard helpers ─────────────────────────────────────────────────
 def get_stats():
     with get_session() as conn:
-        if engine is None:
-            # SQLite
-            total_policies = conn.execute(text(
-                "SELECT COUNT(*) FROM policies WHERE COALESCE(from_renewal,0)=0 AND status NOT IN ('expired','cancelled','discontinued','lapsed','not_renewing')"
-            )).fetchone()[0]
-            total_customers = conn.execute(text(
-                "SELECT COUNT(*) FROM customers WHERE COALESCE(is_potential,0)=0"
-            )).fetchone()[0]
-            pending_renewals = conn.execute(text(
-                "SELECT COUNT(*) FROM renewals WHERE status='pending'"
-            )).fetchone()[0]
-            total_premium = conn.execute(text(
-                "SELECT COALESCE(SUM(premium),0) FROM policies WHERE COALESCE(from_renewal,0)=0 AND status NOT IN ('expired','cancelled','discontinued','lapsed','not_renewing')"
-            )).fetchone()[0]
-            potential_count = conn.execute(text(
-                "SELECT COUNT(*) FROM customers WHERE is_potential=1"
-            )).fetchone()[0]
-        else:
-            total_policies = conn.execute(text(
-                "SELECT COUNT(*) FROM policies WHERE COALESCE(from_renewal,0)=0 AND status NOT IN ('expired','cancelled','discontinued','lapsed','not_renewing')"
-            )).fetchone()[0]
-            total_customers = conn.execute(text(
-                "SELECT COUNT(*) FROM customers WHERE COALESCE(is_potential,0)=0"
-            )).fetchone()[0]
-            pending_renewals = conn.execute(text(
-                "SELECT COUNT(*) FROM renewals WHERE status='pending'"
-            )).fetchone()[0]
-            total_premium = conn.execute(text(
-                "SELECT COALESCE(SUM(premium),0) FROM policies WHERE COALESCE(from_renewal,0)=0 AND status NOT IN ('expired','cancelled','discontinued','lapsed','not_renewing')"
-            )).fetchone()[0]
-            potential_count = conn.execute(text(
-                "SELECT COUNT(*) FROM customers WHERE is_potential=1"
-            )).fetchone()[0]
+        total_policies = conn.execute(text(
+            "SELECT COUNT(*) FROM policies WHERE COALESCE(from_renewal,0)=0 AND status NOT IN ('expired','cancelled','discontinued','lapsed','not_renewing')"
+        )).fetchone()[0]
+        total_customers = conn.execute(text(
+            "SELECT COUNT(*) FROM customers WHERE COALESCE(is_potential,0)=0"
+        )).fetchone()[0]
+        pending_renewals = conn.execute(text(
+            "SELECT COUNT(*) FROM renewals WHERE status='pending'"
+        )).fetchone()[0]
+        total_premium = conn.execute(text(
+            "SELECT COALESCE(SUM(premium),0) FROM policies WHERE COALESCE(from_renewal,0)=0 AND status NOT IN ('expired','cancelled','discontinued','lapsed','not_renewing')"
+        )).fetchone()[0]
+        potential_count = conn.execute(text(
+            "SELECT COUNT(*) FROM customers WHERE is_potential=1"
+        )).fetchone()[0]
         return {
             "total_policies": total_policies or 0,
             "total_customers": total_customers or 0,
@@ -241,12 +169,14 @@ def get_policies_by_customer(cid):
 
 def get_monthly_stats():
     with get_session() as conn:
-        if engine is None:
+        # Detect DB type from DATABASE_URL to avoid depending on engine init
+        import os
+        db_url = os.environ.get("DATABASE_URL", "")
+        if db_url.startswith("postgresql"):
+            date_expr = "TO_CHAR(start_date, 'YYYY-MM')"
+        else:
             # SQLite
             date_expr = "strftime('%Y-%m', start_date)"
-        else:
-            # PostgreSQL
-            date_expr = "TO_CHAR(start_date, 'YYYY-MM')"
         rows = conn.execute(text(
             f"SELECT {date_expr} as month, COUNT(*) as count, SUM(premium) as total "
             "FROM policies WHERE start_date IS NOT NULL AND start_date != '' "
