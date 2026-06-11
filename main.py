@@ -453,3 +453,13 @@ def debug_reports():
         except Exception as e:
             results[name] = {"ok": False, "error": str(e), "trace": traceback.format_exc()}
     return results
+
+@app.get("/debug-env")
+def debug_env():
+    import os
+    url = os.environ.get("DATABASE_URL", "")
+    return {
+        "url_repr": repr(url),
+        "starts_pg": url.startswith("postgresql"),
+        "first_30": url[:30] if url else "EMPTY",
+    }
