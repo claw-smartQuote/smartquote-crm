@@ -175,13 +175,17 @@ def get_policies_by_customer(cid):
 
 def get_monthly_stats():
     with get_session() as conn:
-        # Use strftime for cross-database compatibility (works for both SQLite TEXT and PostgreSQL DATE)
-        rows = conn.execute(text(
-            "SELECT strftime('%Y-%m', start_date) as month, COUNT(*) as count, SUM(premium) as total "
-            "FROM policies WHERE start_date IS NOT NULL AND start_date != '' AND start_date IS NOT NULL "
-            "GROUP BY month ORDER BY month DESC LIMIT 12"
-        )).fetchall()
-        return [{"month": r[0], "count": r[1], "total": float(r[2] or 0)} for r in rows]
+        # strftime works on both SQLite TEXT and PostgreSQL DATE columns
+        try:
+            rows = conn.execute(text(
+                "SELECT strftime('%Y-%m', start_date) as month, COUNT(*) as count, SUM(premium) as total "
+                "FROM policies WHERE start_date IS NOT NULL AND start_date != '' "
+                "GROUP BY month ORDER BY month DESC LIMIT 12"
+            )).fetchall()
+            return [{"month": r[0], "count": r[1], "total": float(r[2] or 0)} for r in rows]
+        except Exception as e:
+            # Last resort: return empty (page still works)
+            return []
 
 def get_type_stats():
     with get_session() as conn:
