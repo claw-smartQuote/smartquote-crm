@@ -169,19 +169,20 @@ def get_policies_by_customer(cid):
 
 def get_monthly_stats():
     with get_session() as conn:
-        # Detect DB type from DATABASE_URL to avoid depending on engine init
-        import os
-        db_url = os.environ.get("DATABASE_URL", "")
-        if db_url.startswith("postgresql"):
-            date_expr = "TO_CHAR(start_date, 'YYYY-MM')"
-        else:
-            # SQLite
-            date_expr = "strftime('%Y-%m', start_date)"
-        rows = conn.execute(text(
-            f"SELECT {date_expr} as month, COUNT(*) as count, SUM(premium) as total "
-            "FROM policies WHERE start_date IS NOT NULL AND start_date != '' "
-            "GROUP BY month ORDER BY month DESC LIMIT 12"
-        )).fetchall()
+        # Try PostgreSQL first; fall back to SQLite on "no such function" error
+        try:
+            rows = conn.execute(text(
+                "SELECT TO_CHAR(start_date, 'YYYY-MM') as month, COUNT(*) as count, SUM(premium) as total "
+                "FROM policies WHERE start_date IS NOT NULL AND start_date != '' "
+                "GROUP BY month ORDER BY month DESC LIMIT 12"
+            )).fetchall()
+        except Exception:
+            # PostgreSQL syntax failed — try SQLite
+            rows = conn.execute(text(
+                "SELECT strftime('%Y-%m', start_date) as month, COUNT(*) as count, SUM(premium) as total "
+                "FROM policies WHERE start_date IS NOT NULL AND start_date != '' "
+                "GROUP BY month ORDER BY month DESC LIMIT 12"
+            )).fetchall()
         return [{"month": r[0], "count": r[1], "total": float(r[2] or 0)} for r in rows]
 
 def get_type_stats():
