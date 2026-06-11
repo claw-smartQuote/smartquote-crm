@@ -8,20 +8,14 @@ from sqlalchemy import create_engine, text, Column, Integer, String, Float, Date
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy.pool import NullPool
 
-DATABASE_URL = os.environ.get(
-    "DATABASE_URL",
+DATABASE_URL = os.environ.get("DATABASE_URL", "") or \
     "postgresql://smartquote_crm_db_user:AFxhpRnvs6zh1p2OUDs2U8KRuI0f21yx@dpg-d8l5gkv7f7vs73flll2g-a/smartquote_crm_db"
-)
 
-# NullPool required for Render managed Postgres (no SSL toggle)
-_known_postgres_urls = (
-    "postgresql://smartquote_crm_db_user:***@dpg-d8l5gkv7f7vs73flll2g-a/smartquote_crm_db",
-)
-if any(DATABASE_URL.startswith(u) for u in _known_postgres_urls) or "postgresql://" in DATABASE_URL or "postgres://" in DATABASE_URL:
+_is_postgres = "postgresql://" in DATABASE_URL or "postgres://" in DATABASE_URL
+
+if _is_postgres:
     engine = create_engine(DATABASE_URL, poolclass=NullPool)
 else:
-    # Local SQLite fallback — use SQLAlchemy so text() works uniformly
-    import sqlite3
     from pathlib import Path
     DB_PATH = Path(__file__).parent / "insurance.db"
     engine = create_engine(f"sqlite:///{DB_PATH}", connect_args={"check_same_thread": False})
@@ -75,8 +69,7 @@ def get_session():
 
 # ── Init DB ─────────────────────────────────────────────────────────────────
 def init_db():
-    import os
-    if os.environ.get("DATABASE_URL", "").startswith("postgresql"):
+    if _is_postgres:
         return  # PostgreSQL tables already exist
     conn = _get_sqlite_conn()
     cur = conn.cursor()
@@ -175,16 +168,18 @@ def get_policies_by_customer(cid):
 
 def get_monthly_stats():
     with get_session() as conn:
-        # strftime works on both SQLite TEXT and PostgreSQL DATE columns
         try:
+            if _is_postgres:
+                date_expr = "TO_CHAR(start_date, 'YYYY-MM')"
+            else:
+                date_expr = "strftime('%Y-%m', start_date)"
             rows = conn.execute(text(
-                "SELECT strftime('%Y-%m', start_date) as month, COUNT(*) as count, SUM(premium) as total "
+                f"SELECT {date_expr} as month, COUNT(*) as count, SUM(premium) as total "
                 "FROM policies WHERE start_date IS NOT NULL AND start_date != '' "
                 "GROUP BY month ORDER BY month DESC LIMIT 12"
             )).fetchall()
             return [{"month": r[0], "count": r[1], "total": float(r[2] or 0)} for r in rows]
-        except Exception as e:
-            # Last resort: return empty (page still works)
+        except Exception:
             return []
 
 def get_type_stats():
@@ -254,12 +249,18 @@ def get_customer(cid):
         row = conn.execute(text("SELECT * FROM customers WHERE id=:id"), {"id": cid}).fetchone()
         return row_to_dict(row)
 
+def _insert_returning_id(conn, sql, params):
+    if _is_postgres:
+        return conn.execute(text(sql), params).fetchone()[0]
+    else:
+        conn.execute(text(sql), params)
+        return conn.execute(text("SELECT last_insert_rowid()")).fetchone()[0]
+
 def create_customer(name, phone, email):
     with get_session() as conn:
-        result = conn.execute(text(
-            "INSERT INTO customers (name,phone,email) VALUES (:n,:p,:e) RETURNING id"
-        ), {"n": name, "p": phone, "e": email})
-        cid = result.fetchone()[0]
+        cid = _insert_returning_id(conn,
+            "INSERT INTO customers (name,phone,email) VALUES (:n,:p,:e) RETURNING id",
+            {"n": name, "p": phone, "e": email})
         _log_activity(conn, 'create', 'customer', cid, f'新增客戶: {name}', f'電話: {phone}')
         conn.commit()
     return get_customer(cid)
@@ -347,7 +348,7 @@ def create_policy(customer_id, license_plate, policy_type, coverage_amount,
                   excess_parking="", excess_theft="",
                   excess_windscreen="", excess_authorised_repair=""):
     with get_session() as conn:
-        result = conn.execute(text("""
+        pid = _insert_returning_id(conn, """
             INSERT INTO policies
             (customer_id, license_plate, policy_type, coverage_amount, premium,
              start_date, expiry_date, status, notes, insurance_company, policy_number,
@@ -356,7 +357,7 @@ def create_policy(customer_id, license_plate, policy_type, coverage_amount,
              excess_parking, excess_theft, excess_windscreen, excess_authorised_repair)
             VALUES (:cid,:lp,:pt,:ca,:pr,:sd,:ed,:st,:nt,:ic,:pn,:ac,:vm,:vy,:ei,
                     :ncb,:ey,:exi,:eu,:etppd,:ep,:eth,:ew,:ear) RETURNING id
-        """), {
+        """, {
             "cid": customer_id, "lp": license_plate, "pt": policy_type,
             "ca": coverage_amount, "pr": premium, "sd": start_date, "ed": expiry_date,
             "st": status, "nt": notes, "ic": insurance_company, "pn": policy_number,
@@ -365,7 +366,6 @@ def create_policy(customer_id, license_plate, policy_type, coverage_amount,
             "eu": excess_unnamed, "etppd": excess_tppd, "ep": excess_parking,
             "eth": excess_theft, "ew": excess_windscreen, "ear": excess_authorised_repair
         })
-        pid = result.fetchone()[0]
         _log_activity(conn, 'create', 'policy', pid, f'新增保單: {license_plate}', f'保費: {premium}')
         conn.commit()
     return get_policy(pid)
@@ -435,11 +435,10 @@ def get_coverages_by_policy(pid):
 
 def create_coverage(policy_id, coverage_name, coverage_amount, premium, notes):
     with get_session() as conn:
-        result = conn.execute(text("""
+        cid = _insert_returning_id(conn, """
             INSERT INTO coverages (policy_id,coverage_name,coverage_amount,premium,notes)
             VALUES (:pid,:cn,:ca,:pr,:nt) RETURNING id
-        """), {"pid": policy_id, "cn": coverage_name, "ca": coverage_amount, "pr": premium, "nt": notes})
-        cid = result.fetchone()[0]
+        """, {"pid": policy_id, "cn": coverage_name, "ca": coverage_amount, "pr": premium, "nt": notes})
         conn.commit()
         return cid
 
@@ -479,31 +478,29 @@ def create_renewal(original_policy_id, customer_id, license_plate,
             conn.execute(text(
                 "UPDATE policies SET status='renewed',updated_at=CURRENT_TIMESTAMP WHERE id=:id"
             ), {"id": original_policy_id})
-        result = conn.execute(text("""
+        new_policy_id = _insert_returning_id(conn, """
             INSERT INTO policies (customer_id,license_plate,policy_type,coverage_amount,
              premium,start_date,expiry_date,status,notes)
             VALUES (:cid,:lp,:pt,:ca,:pr,:sd,:ed,'active',:nt) RETURNING id
-        """), {
+        """, {
             "cid": customer_id, "lp": license_plate, "pt": policy_type, "ca": coverage_amount,
             "pr": premium, "sd": effective_date, "ed": expiry_date,
             "nt": f"[續保] {notes}" if notes else "[續保]"
         })
-        new_policy_id = result.fetchone()[0]
-        result2 = conn.execute(text("""
+        rid = _insert_returning_id(conn, """
             INSERT INTO renewals
             (original_policy_id,new_policy_id,customer_id,license_plate,insurance_company,
              policy_type,coverage_amount,premium,effective_date,expiry_date,status,notes,
              agent_person,policy_number,vehicle_model,phone)
             VALUES (:opid,:npid,:cid,:lp,:ic,:pt,:ca,:pr,:sd,:ed,'pending',:nt,
                     :ap,:pn,:vm,:ph) RETURNING id
-        """), {
+        """, {
             "opid": original_policy_id, "npid": new_policy_id, "cid": customer_id,
             "lp": license_plate, "ic": insurance_company, "pt": policy_type,
             "ca": coverage_amount, "pr": premium, "sd": effective_date, "ed": expiry_date,
             "nt": notes, "ap": agent_person, "pn": policy_number,
             "vm": vehicle_model, "ph": phone
         })
-        rid = result2.fetchone()[0]
         conn.commit()
     return get_renewal(rid)
 
