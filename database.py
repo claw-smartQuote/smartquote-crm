@@ -8,10 +8,16 @@ from sqlalchemy import create_engine, text, Column, Integer, String, Float, Date
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy.pool import NullPool
 
-DATABASE_URL = os.environ.get("DATABASE_URL", "")
+DATABASE_URL = os.environ.get(
+    "DATABASE_URL",
+    "postgresql://smartquote_crm_db_user:***@dpg-d8l5gkv7f7vs73flll2g-a/smartquote_crm_db"
+)
 
 # NullPool required for Render managed Postgres (no SSL toggle)
-if DATABASE_URL.startswith(("postgres://", "postgresql://")):
+_known_postgres_urls = (
+    "postgresql://smartquote_crm_db_user:***@dpg-d8l5gkv7f7vs73flll2g-a/smartquote_crm_db",
+)
+if any(DATABASE_URL.startswith(u) for u in _known_postgres_urls) or "postgresql://" in DATABASE_URL or "postgres://" in DATABASE_URL:
     engine = create_engine(DATABASE_URL, poolclass=NullPool)
 else:
     # Local SQLite fallback — use SQLAlchemy so text() works uniformly
