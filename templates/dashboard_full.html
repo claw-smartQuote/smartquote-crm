@@ -1,0 +1,499 @@
+{% extends "base.html" %}
+{% block title %}首頁儀表板 - 保險客戶管理系統{% endblock %}
+{% block extra_head %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+{% endblock %}
+{% block content %}
+<h2 class="mb-4 fw-bold">📊 首頁儀表板</h2>
+
+<!-- Quick Actions & Search -->
+<div class="row g-3 mb-4">
+    <div class="col-md-4">
+        <div class="d-flex gap-2">
+            <button class="btn btn-primary flex-fill" onclick="openModal('customer')">
+                <strong>+ 客戶</strong>
+            </button>
+            <button class="btn btn-success flex-fill" onclick="openModal('policy')">
+                <strong>+ 保單</strong>
+            </button>
+        </div>
+    </div>
+    <div class="col-md-4">
+        <div class="input-group">
+            <input type="text" id="globalSearch" class="form-control" placeholder="🔍 搜尋客戶、車牌、電話..." onkeyup="handleGlobalSearch(event)">
+            <button class="btn btn-outline-secondary" onclick="doGlobalSearch()">搜尋</button>
+        </div>
+    </div>
+    <div class="col-md-4">
+        <select class="form-select" onchange="location.href='/policies?status=' + this.value">
+            <option value="">所有狀態</option>
+            <option value="active">生效中</option>
+            <option value="expired">已過期</option>
+            <option value="renewed">已續保</option>
+            <option value="cancelled">已取消</option>
+        </select>
+    </div>
+</div>
+
+<!-- Stats Cards -->
+<div class="row g-3 mb-4">
+    <div class="col-sm-6 col-lg-3">
+        <div class="card card-stat p-3">
+            <div class="d-flex justify-content-between align-items-start">
+                <div>
+                    <div class="stat-value text-primary">{{ stats.total_customers }}</div>
+                    <div class="stat-label">正式客戶</div>
+                </div>
+                <div class="bg-primary bg-opacity-10 rounded p-2">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="#0d6efd" viewBox="0 0 16 16"><path d="M8 8a3 3 0 1 0 0-6 3 3 0 0 0 0 6zm2-3a2 2 0 1 1-4 0 2 2 0 0 1 4 0zm4 8c0 1-1 1-1 1H3s-1 0-1-1 1-4 6-4 6 3 6 4zm-1-.004c-.001-.246-.154-.986-.832-1.664C11.516 10.68 10.289 10 8 10c-2.29 0-3.516.68-4.168 1.332-.678.678-.83 1.418-.832 1.664h10z"/></svg>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="col-sm-6 col-lg-3">
+        <div class="card card-stat p-3">
+            <div class="d-flex justify-content-between align-items-start">
+                <div>
+                    <div class="stat-value text-secondary">{{ stats.potential_count or 0 }}</div>
+                    <div class="stat-label">待續保客戶</div>
+                </div>
+                <div class="bg-secondary bg-opacity-10 rounded p-2">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="#6c757d" viewBox="0 0 16 16"><path d="M11.534 7h3.932a.25.25 0 0 1 .192.41l-1.966 2.36a.25.25 0 0 1-.384 0l-1.966-2.36a.25.25 0 0 1 .192-.41zm-11 2h3.932a.25.25 0 0 0 .192-.41L2.692 6.23a.25.25 0 0 0-.384 0L.342 8.59A.25.25 0 0 0 .534 9z"/><path fill-rule="evenodd" d="M8 3c-1.552 0-2.94.707-3.857 1.818a.5.5 0 1 1-.771-.636A6.002 6.002 0 0 1 13.917 7H12.9A5.002 5.002 0 0 0 8 3zM3.1 9a5.002 5.002 0 0 0 8.757 2.182.5.5 0 1 1 .771.636A6.002 6.002 0 0 1 2.083 9H3.1z"/></svg>
+                </div>
+            </div>
+            {% if stats.potential_count > 0 %}
+            <a href="/renewals" class="stretched-link"></a>
+            {% endif %}
+        </div>
+    </div>
+    <div class="col-sm-6 col-lg-3">
+        <div class="card card-stat p-3">
+            <div class="d-flex justify-content-between align-items-start">
+                <div>
+                    <div class="stat-value text-success">{{ stats.total_policies }}</div>
+                    <div class="stat-label">總保單數</div>
+                </div>
+                <div class="bg-success bg-opacity-10 rounded p-2">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="#198754" viewBox="0 0 16 16"><path d="M1 0L0 1l2.5 2.5L0 6l1 1 3.5-3.5L7 6l1-1-2.5-2.5L8 1l-1-1H1z"/><path d="M9.5 1a.5.5 0 0 1 .5.5v1a.5.5 0 0 1-.5.5h-3a.5.5 0 0 1-.5-.5v-1a.5.5 0 0 1 .5-.5h3zm-3-1A1.5 1.5 0 0 0 5 1.5v1A1.5 1.5 0 0 0 6.5 4h3A1.5 1.5 0 0 0 11 2.5v-1A1.5 1.5 0 0 0 9.5 0h-3z"/></svg>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="col-sm-6 col-lg-3">
+        <div class="card card-stat p-3">
+            <div class="d-flex justify-content-between align-items-start">
+                <div>
+                    <div class="stat-value text-warning">${{ "{:,.0f}".format(stats.total_premium) }}</div>
+                    <div class="stat-label">總保費 (港幣)</div>
+                </div>
+                <div class="bg-warning bg-opacity-10 rounded p-2">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="#ffc107" viewBox="0 0 16 16"><path d="M4 10.781c.148 1.667 1.513 2.85 3.591 3.003V15h1.043v-1.216c2.27-.179 3.678-1.438 3.678-3.3 0-1.59-.947-2.51-2.956-3.028l-.722-.187V3.467c1.122.11 1.879.714 2.07 1.616h1.47c-.166-1.6-1.54-2.748-3.54-2.875V1H7.591v1.233c-1.939.23-3.27 1.472-3.27 3.156 0 1.454.966 2.483 2.661 2.917l.61.162v4.031c-1.149-.17-1.94-.8-2.131-1.718H4zm3.391-3.836c-1.043-.263-1.6-.825-1.6-1.616 0-.944.704-1.641 1.8-1.828v3.495l-.2-.05zm1.591 1.872c1.287.323 1.852.859 1.852 1.769 0 1.097-.826 1.828-2.2 1.939V11.27l-.813-.28z"/></svg>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="col-sm-6 col-lg-3">
+        <div class="card card-stat p-3 position-relative">
+            <div class="d-flex justify-content-between align-items-start">
+                <div>
+                    <div class="stat-value text-danger">{{ expiring|length }}</div>
+                    <div class="stat-label">30日內到期</div>
+                </div>
+                <div class="bg-danger bg-opacity-10 rounded p-2">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="#dc3545" viewBox="0 0 16 16"><path d="M8 3.5a.5.5 0 0 0-1 0V9a.5.5 0 0 0 .252.434l3.5 2a.5.5 0 0 0 .496-.868L8 8.71V3.5z"/><path d="M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16zm7-8A7 7 0 1 1 1 8a7 7 0 0 1 14 0z"/></svg>
+                </div>
+            </div>
+            {% if expiring|length > 0 %}
+            <a href="/renewals" class="stretched-link"></a>
+            {% endif %}
+        </div>
+    </div>
+</div>
+
+<!-- Charts Row -->
+<div class="row g-4 mb-4">
+    <div class="col-lg-6">
+        <div class="card shadow-sm">
+            <div class="card-header bg-white">
+                <strong>📈 保費走勢 (月度)</strong>
+            </div>
+            <div class="card-body">
+                <canvas id="monthlyChart" height="200"></canvas>
+            </div>
+        </div>
+    </div>
+    <div class="col-lg-6">
+        <div class="card shadow-sm">
+            <div class="card-header bg-white">
+                <strong>📊 險種分佈</strong>
+            </div>
+            <div class="card-body">
+                <canvas id="typeChart" height="200"></canvas>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row g-4">
+    <!-- Expiring Policies -->
+    <div class="col-lg-7">
+        <div class="card shadow-sm">
+            <div class="card-header bg-white d-flex justify-content-between align-items-center">
+                <strong>⏰ 30日內到期保單</strong>
+                <div class="btn-group btn-group-sm">
+                    <a href="/policies?filter=expiring" class="btn btn-outline-danger">全部</a>
+                    <a href="/renewals" class="btn btn-primary">續保管理</a>
+                </div>
+            </div>
+            <div class="card-body p-0">
+                {% if expiring %}
+                <div class="table-responsive">
+                    <table class="table table-hover mb-0">
+                        <thead class="table-light">
+                            <tr>
+                                <th>車牌</th>
+                                <th>客戶</th>
+                                <th>險種</th>
+                                <th>到期日</th>
+                                <th>保費</th>
+                                <th>操作</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for p in expiring %}
+                            <tr>
+                                <td><span class="badge bg-dark">{{ p.license_plate }}</span></td>
+                                <td>{{ p.customer_name }}</td>
+                                <td>{{ p.policy_type }}</td>
+                                <td><span class="text-danger fw-bold">{{ p.expiry_date }}</span></td>
+                                <td>${{ "{:,.0f}".format(p.premium) }}</td>
+                                <td>
+                                    <button class="btn btn-sm btn-success" onclick="createRenewal({{ p.id }}, '{{ p.customer_name }}', '{{ p.license_plate }}')">續保</button>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                {% else %}
+                <div class="text-center py-4 text-muted">目前沒有即將到期的保單 🎉</div>
+                {% endif %}
+            </div>
+        </div>
+
+        <!-- Activity Log -->
+        <div class="card shadow-sm mt-3">
+            <div class="card-header bg-white d-flex justify-content-between align-items-center">
+                <strong>📋 活動紀錄</strong>
+            </div>
+            <div class="card-body p-0" style="max-height:250px;overflow-y:auto;">
+                {% if recent_activity %}
+                <ul class="list-group list-group-flush">
+                    {% for a in recent_activity %}
+                    <li class="list-group-item">
+                        <div class="d-flex align-items-center">
+                            {% if a.action == 'create' %}
+                            <span class="badge bg-success me-2">➕ 新增</span>
+                            {% elif a.action == 'update' %}
+                            <span class="badge bg-primary me-2">✏️ 更新</span>
+                            {% elif a.action == 'delete' %}
+                            <span class="badge bg-danger me-2">🗑️ 刪除</span>
+                            {% else %}
+                            <span class="badge bg-secondary me-2">📝</span>
+                            {% endif %}
+                            <div>
+                                <strong>{{ a.description }}</strong><br>
+                                <small class="text-muted">{{ a.created_at }}</small>
+                            </div>
+                        </div>
+                    </li>
+                    {% endfor %}
+                </ul>
+                {% else %}
+                <div class="text-center py-4 text-muted">暫無活動紀錄</div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+
+    <!-- Recent Customers -->
+    <div class="col-lg-5">
+        <div class="card shadow-sm">
+            <div class="card-header bg-white d-flex justify-content-between align-items-center">
+                <strong>👤 最近新增客戶</strong>
+                <a href="/customers" class="btn btn-sm btn-outline-primary">客戶列表</a>
+            </div>
+            <div class="card-body p-0">
+                {% if recent_customers %}
+                <ul class="list-group list-group-flush">
+                    {% for c in recent_customers %}
+                    <li class="list-group-item d-flex justify-content-between align-items-center">
+                        <div>
+                            <strong>{{ c.name }}</strong><br>
+                            <small class="text-muted">{{ c.phone }}</small>
+                        </div>
+                        <div class="btn-group btn-group-sm">
+                            <a href="/customers" class="btn btn-outline-secondary">查看</a>
+                            {% if c.phone %}
+                            <a href="https://wa.me/852{{ c.phone }}" target="_blank" class="btn btn-success">📱</a>
+                            {% endif %}
+                        </div>
+                    </li>
+                    {% endfor %}
+                </ul>
+                {% else %}
+                <div class="text-center py-4 text-muted">暫無客戶資料</div>
+                {% endif %}
+            </div>
+        </div>
+
+        <!-- Backup Status -->
+        <div class="card shadow-sm mt-3">
+            <div class="card-header bg-white d-flex justify-content-between align-items-center">
+                <strong>☁️ iCloud 備份</strong>
+                <button class="btn btn-outline-primary btn-sm" onclick="manualBackup()">立即備份</button>
+            </div>
+            <div class="card-body">
+                {% if backup_status.last_backup %}
+                <div class="text-success">✅ {{ backup_status.last_backup }}</div>
+                {% else %}
+                <div class="text-muted">⚠️ 尚未備份</div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Create Customer Modal -->
+<div class="modal fade" id="customerModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">➕ 新增客戶</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="mb-2">
+                    <label class="form-label">姓名 *</label>
+                    <input type="text" id="newCustomerName" class="form-control" required>
+                </div>
+                <div class="mb-2">
+                    <label class="form-label">電話</label>
+                    <input type="text" id="newCustomerPhone" class="form-control">
+                </div>
+                <div class="mb-2">
+                    <label class="form-label">電郵</label>
+                    <input type="email" id="newCustomerEmail" class="form-control">
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-primary" onclick="createCustomer()">儲存</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Create Policy Modal -->
+<div class="modal fade" id="policyModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">📋 新增保單</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="mb-2">
+                    <label class="form-label">客戶 *</label>
+                    <select id="newPolicyCustomer" class="form-select" required></select>
+                </div>
+                <div class="mb-2">
+                    <label class="form-label">車牌</label>
+                    <input type="text" id="newPolicyPlate" class="form-control">
+                </div>
+                <div class="mb-2">
+                    <label class="form-label">險種</label>
+                    <select id="newPolicyType" class="form-select">
+                        <option value="港車北上">港車北上</option>
+                        <option value="全保">全保</option>
+                        <option value="第三者責任">第三者責任</option>
+                        <option value="其他">其他</option>
+                    </select>
+                </div>
+                <div class="row">
+                    <div class="col-6 mb-2">
+                        <label class="form-label">保額</label>
+                        <input type="number" id="newPolicyCoverage" class="form-control" value="0">
+                    </div>
+                    <div class="col-6 mb-2">
+                        <label class="form-label">保費 (港幣)</label>
+                        <input type="number" id="newPolicyPremium" class="form-control" value="0">
+                    </div>
+                </div>
+                <div class="row">
+                    <div class="col-6 mb-2">
+                        <label class="form-label">生效日</label>
+                        <input type="date" id="newPolicyStart" class="form-control">
+                    </div>
+                    <div class="col-6 mb-2">
+                        <label class="form-label">到期日</label>
+                        <input type="date" id="newPolicyExpiry" class="form-control">
+                    </div>
+                </div>
+                <div class="mb-2">
+                    <label class="form-label">備註</label>
+                    <textarea id="newPolicyNotes" class="form-control" rows="2"></textarea>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-success" onclick="createPolicy()">儲存</button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Charts
+async function loadCharts() {
+    try {
+        const [monthly, typeStats] = await Promise.all([
+            axios.get('/api/reports/monthly'),
+            axios.get('/api/reports/type')
+        ]);
+        
+        // Monthly Chart
+        const monthlyCtx = document.getElementById('monthlyChart').getContext('2d');
+        const months = monthly.data.slice().reverse().map(m => m.month || 'N/A');
+        const totals = monthly.data.slice().reverse().map(m => m.total || 0);
+        
+        new Chart(monthlyCtx, {
+            type: 'bar',
+            data: {
+                labels: months,
+                datasets: [{
+                    label: '保費 (HK$)',
+                    data: totals,
+                    backgroundColor: 'rgba(13, 110, 253, 0.6)',
+                    borderColor: 'rgba(13, 110, 253, 1)',
+                    borderWidth: 1
+                }]
+            },
+            options: {
+                responsive: true,
+                plugins: { legend: { display: false } },
+                scales: { y: { beginAtZero: true } }
+            }
+        });
+        
+        // Type Chart
+        const typeCtx = document.getElementById('typeChart').getContext('2d');
+        const types = typeStats.data.map(t => t.policy_type || 'N/A');
+        const typeTotals = typeStats.data.map(t => t.total || 0);
+        const colors = ['#0d6efd', '#198754', '#ffc107', '#dc3545', '#0dcaf0', '#6f42c1'];
+        
+        new Chart(typeCtx, {
+            type: 'doughnut',
+            data: {
+                labels: types,
+                datasets: [{
+                    data: typeTotals,
+                    backgroundColor: colors.slice(0, types.length)
+                }]
+            },
+            options: {
+                responsive: true,
+                plugins: { legend: { position: 'bottom' } }
+            }
+        });
+    } catch(e) { console.error('Chart error:', e); }
+}
+
+// Quick actions
+function openModal(type) {
+    if (type === 'customer') {
+        new bootstrap.Modal(document.getElementById('customerModal')).show();
+    } else if (type === 'policy') {
+        loadCustomersForPolicy();
+        new bootstrap.Modal(document.getElementById('policyModal')).show();
+    }
+}
+
+async function loadCustomersForPolicy() {
+    try {
+        const res = await axios.get('/api/customers');
+        const select = document.getElementById('newPolicyCustomer');
+        select.innerHTML = res.data.map(c => `<option value="${c.id}">${c.name} (${c.phone || '無電話'})</option>`).join('');
+    } catch(e) { console.error(e); }
+}
+
+async function createCustomer() {
+    const name = document.getElementById('newCustomerName').value.trim();
+    if (!name) { alert('請輸入客戶姓名'); return; }
+    try {
+        showLoading();
+        await axios.post('/api/customers', new URLSearchParams({
+            name, phone: document.getElementById('newCustomerPhone').value,
+            email: document.getElementById('newCustomerEmail').value
+        }));
+        location.reload();
+    } catch(e) { alert('創建失敗'); }
+    finally { hideLoading(); }
+}
+
+async function createPolicy() {
+    const customer_id = document.getElementById('newPolicyCustomer').value;
+    if (!customer_id) { alert('請選擇客戶'); return; }
+    try {
+        showLoading();
+        await axios.post('/api/policies', new URLSearchParams({
+            customer_id, license_plate: document.getElementById('newPolicyPlate').value,
+            policy_type: document.getElementById('newPolicyType').value,
+            coverage_amount: document.getElementById('newPolicyCoverage').value,
+            premium: document.getElementById('newPolicyPremium').value,
+            start_date: document.getElementById('newPolicyStart').value,
+            expiry_date: document.getElementById('newPolicyExpiry').value,
+            notes: document.getElementById('newPolicyNotes').value
+        }));
+        location.reload();
+    } catch(e) { alert('創建失敗'); }
+    finally { hideLoading(); }
+}
+
+function createRenewal(policyId, customerName, plate) {
+    location.href = `/renewals?policy_id=${policyId}&customer=${encodeURIComponent(customerName)}&plate=${encodeURIComponent(plate)}`;
+}
+
+function handleGlobalSearch(e) {
+    if (e.key === 'Enter') doGlobalSearch();
+}
+
+function doGlobalSearch() {
+    const q = document.getElementById('globalSearch').value.trim();
+    if (q) location.href = `/customers?search=${encodeURIComponent(q)}`;
+}
+
+async function manualBackup() {
+    showLoading();
+    try {
+        await axios.post('/api/backup/now');
+        location.reload();
+    } catch(e) { alert('備份失敗'); }
+    finally { hideLoading(); }
+}
+
+function showLoading() { document.getElementById('loadingOverlay').style.display='flex'; }
+function hideLoading() { document.getElementById('loadingOverlay').style.display='none'; }
+
+// Load customers for search
+async function loadSearchCustomers() {
+    const q = new URLSearchParams(window.location.search).get('search');
+    if (q) document.getElementById('globalSearch').value = q;
+}
+
+loadCharts();
+loadSearchCustomers();
+</script>
+{% endblock %}

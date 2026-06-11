@@ -191,7 +191,11 @@ def api_customer_policies(cid: int):
 # ── API: Policies ───────────────────────────────────────────────────────────
 @app.get("/api/policies")
 def api_policies(include_renewal: bool = False):
-    return database.get_all_policies(include_renewal=include_renewal)
+    try:
+        return database.get_all_policies(include_renewal=include_renewal)
+    except Exception as e:
+        import traceback
+        raise HTTPException(500, f"Database error: {str(e)}\n{traceback.format_exc()}")
 
 @app.get("/api/policies/{pid}")
 def api_get_policy(pid: int):
