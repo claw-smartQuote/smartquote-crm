@@ -22,8 +22,15 @@ STATIC_DIR.mkdir(exist_ok=True)
 TEMPLATES_DIR.mkdir(exist_ok=True)
 
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
-templates = Jinja2Templates(directory=str(TEMPLATES_DIR), auto_reload=True)
-templates.env.cache = {}
+from jinja2 import Environment, FileSystemLoader, select_autoescape
+_jinja_env = Environment(
+    loader=FileSystemLoader(str(TEMPLATES_DIR)),
+    autoescape=select_autoescape(),
+    auto_reload=True,
+    cache_size=0,
+)
+from starlette.templating import Jinja2Templates
+templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
 # ── Init ─────────────────────────────────────────────────────────────────────
 @app.get("/health")
@@ -52,14 +59,16 @@ def dashboard(request: Request):
         pathlib.Path('/tmp/dash_error.log').write_text(err)
         return HTMLResponse(f"Dashboard Error (logged):\n{err}", status_code=500)
     try:
-        return templates.TemplateResponse("dashboard.html", {
-            "request": request,
-            "stats": stats,
-            "expiring": expiring,
-            "recent_customers": recent_customers,
-            "backup_status": backup_status,
-            "recent_activity": recent_activity,
-        })
+        # Use clean Jinja2 env to avoid Python 3.14 cache bug
+        tmpl = _jinja_env.get_template("dashboard.html")
+        html = tmpl.render(
+            stats=stats,
+            expiring=expiring,
+            recent_customers=recent_customers,
+            backup_status=backup_status,
+            recent_activity=recent_activity,
+        )
+        return HTMLResponse(html)
     except Exception as e:
         import traceback
         return HTMLResponse(f"<pre>Template Error:\n{traceback.format_exc()}\n\nContext:\nstats={stats}\nexpiring={expiring}\n</pre>", status_code=500)
