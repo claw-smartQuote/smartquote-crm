@@ -73,77 +73,50 @@ def dashboard(request: Request):
         import traceback
         return HTMLResponse(f"<pre>Template Error:\n{traceback.format_exc()}\n\nContext:\nstats={stats}\nexpiring={expiring}\n</pre>", status_code=500)
 
+# Helper: use clean Jinja2 env to avoid Python 3.14 + Starlette cache bug
+def render_page(template_name, **context):
+    tmpl = _jinja_env.get_template(template_name)
+    return HTMLResponse(tmpl.render(**context))
+
 @app.get("/customers", response_class=HTMLResponse)
 def customers_page(request: Request):
-    return templates.TemplateResponse("customers.html", {
-        "request": request,
-        "customers": database.get_all_customers(include_potential=False),
-    })
+    return render_page("customers.html", customers=database.get_all_customers(include_potential=False))
 
 @app.get("/policies", response_class=HTMLResponse)
 def policies_page(request: Request):
-    return templates.TemplateResponse("policies.html", {
-        "request": request,
-        "policies": database.get_all_policies(include_renewal=False),
-        "customers": database.get_all_customers(include_potential=False),
-    })
+    return render_page("policies.html",
+        policies=database.get_all_policies(include_renewal=False),
+        customers=database.get_all_customers(include_potential=False))
 
 @app.get("/lapsed", response_class=HTMLResponse)
 def lapsed_policies_page(request: Request):
-    return templates.TemplateResponse("lapsed_policies.html", {
-        "request": request,
-        "policies": database.get_lapsed_policies(),
-        "customers": database.get_all_customers(include_potential=True),
-    })
+    return render_page("lapsed_policies.html",
+        policies=database.get_lapsed_policies(),
+        customers=database.get_all_customers(include_potential=True))
 
 @app.get("/coverages", response_class=HTMLResponse)
 def coverages_page(request: Request):
-    return templates.TemplateResponse("coverages.html", {
-        "request": request,
-        "policies": database.get_all_policies(include_renewal=False),
-    })
+    return render_page("coverages.html",
+        policies=database.get_all_policies(include_renewal=False))
 
 @app.get("/reports", response_class=HTMLResponse)
 def reports_page(request: Request):
-    return templates.TemplateResponse("reports.html", {
-        "request": request,
-        "monthly": database.get_monthly_stats(),
-        "type_stats": database.get_type_stats(),
-        "status_stats": database.get_status_stats(),
-        "pending_stats": database.get_pending_renewal_stats(),
-    })
-
-@app.get("/api/reports/monthly")
-def api_reports_monthly():
-    return database.get_monthly_stats()
-
-@app.get("/api/reports/type")
-def api_reports_type():
-    return database.get_type_stats()
-
-@app.get("/api/reports/status")
-def api_reports_status():
-    return database.get_status_stats()
-
-@app.get("/api/reports/pending-renewals")
-def api_reports_pending_renewals():
-    return database.get_pending_renewal_stats()
+    return render_page("reports.html",
+        monthly=database.get_monthly_stats(),
+        type_stats=database.get_type_stats(),
+        status_stats=database.get_status_stats(),
+        pending_stats=database.get_pending_renewal_stats())
 
 @app.get("/export", response_class=HTMLResponse)
 def export_page(request: Request):
-    return templates.TemplateResponse("export.html", {
-        "request": request,
-        "backup_status": icloud_backup.get_status(),
-    })
+    return render_page("export.html", backup_status=icloud_backup.get_status())
 
 @app.get("/renewals", response_class=HTMLResponse)
 def renewals_page(request: Request):
-    return templates.TemplateResponse("renewals.html", {
-        "request": request,
-        "renewals": database.get_all_renewals(),
-        "customers": database.get_all_customers_for_renewals(),
-        "policies": database.get_all_policies(include_renewal=True),
-    })
+    return render_page("renewals.html",
+        renewals=database.get_all_renewals(),
+        customers=database.get_all_customers_for_renewals(),
+        policies=database.get_all_policies(include_renewal=True))
 
 # ── API: Customers ──────────────────────────────────────────────────────────
 @app.get("/api/customers")
