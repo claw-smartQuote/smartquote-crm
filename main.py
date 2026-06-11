@@ -101,11 +101,27 @@ def coverages_page(request: Request):
 
 @app.get("/reports", response_class=HTMLResponse)
 def reports_page(request: Request):
+    try:
+        monthly = database.get_monthly_stats()
+    except Exception:
+        monthly = []
+    try:
+        type_stats = database.get_type_stats()
+    except Exception:
+        type_stats = []
+    try:
+        status_stats = database.get_status_stats()
+    except Exception:
+        status_stats = []
+    try:
+        pending_stats = database.get_pending_renewal_stats()
+    except Exception:
+        pending_stats = {"pending": 0}
     return render_page("reports.html",
-        monthly=database.get_monthly_stats(),
-        type_stats=database.get_type_stats(),
-        status_stats=database.get_status_stats(),
-        pending_stats=database.get_pending_renewal_stats())
+        monthly=monthly,
+        type_stats=type_stats,
+        status_stats=status_stats,
+        pending_stats=pending_stats)
 
 @app.get("/export", response_class=HTMLResponse)
 def export_page(request: Request):
