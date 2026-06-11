@@ -472,14 +472,17 @@ def delete_policy(pid):
         conn.commit()
 
 def get_expiring_policies(days=30):
+    from datetime import date, timedelta
+    today = date.today()
+    future = today + timedelta(days=days)
     with get_session() as conn:
         rows = conn.execute(text("""
             SELECT p.*, c.name as customer_name
             FROM policies p LEFT JOIN customers c ON p.customer_id=c.id
-            WHERE date(p.expiry_date) BETWEEN date('now') AND date('now', '+' || :days || ' days')
+            WHERE p.expiry_date BETWEEN :today AND :future
               AND p.status='active'
             ORDER BY p.expiry_date ASC
-        """), {"days": days}).fetchall()
+        """), {"today": today.isoformat(), "future": future.isoformat()}).fetchall()
         return [row_to_dict(r) for r in rows]
 
 
