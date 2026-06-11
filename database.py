@@ -123,8 +123,8 @@ def init_db():
                 entity_id INTEGER, description TEXT, details TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
         """)
-        conn.commit()
-        conn.close()
+    conn.commit()
+    conn.close()
 
 
 # ── Stats / Dashboard helpers ─────────────────────────────────────────────────
