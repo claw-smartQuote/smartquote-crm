@@ -501,21 +501,28 @@ async def lark_webhook_verify(request: Request, challenge: str = Query(None)):
 
 @app.post("/webhook/lark")
 async def lark_webhook_event(request: Request):
-    """Lark 消息 Webhook 端點"""
+    """Lark 消息 Webhook 端點（支持 v1 和 v2 格式）"""
+    from fastapi.responses import JSONResponse
     try:
         body = await request.json()
     except:
-        from fastapi.responses import JSONResponse
         return JSONResponse({"error": "Invalid JSON"}, status_code=400)
 
-    event_type = body.get("event_type", "")
+    # Support both v1 and v2 event formats
+    event_type = body.get("event_type", "") or body.get("header", {}).get("event_type", "")
+    event_data = body.get("event", {})
+
+    # Handle Lark v2 challenge verification
+    challenge = body.get("challenge", "")
+    if challenge and body.get("type") == "url_verification":
+        return JSONResponse({"challenge": challenge})
+
     print(f"[LARK WEBHOOK] Event: {event_type}")
-    print(f"[LARK WEBHOOK] Body: {json.dumps(body, ensure_ascii=False)[:300]}")
+    print(f"[LARK WEBHOOK] Body: {json.dumps(body, ensure_ascii=False)[:500]}")
 
     if event_type == "im.message.receive_v1":
-        return await lark_handle_message(body.get("event", {}))
+        return await lark_handle_message(event_data)
 
-    from fastapi.responses import JSONResponse
     return JSONResponse({"code": 0, "msg": "ok"})
 
 async def lark_handle_message(event):
@@ -537,12 +544,19 @@ async def lark_handle_message(event):
         content = {}
 
     print(f"[LARK] msg_type={msg_type}, msg_id={msg_id}, open_id={open_id}")
+    print(f"[LARK] content={json.dumps(content, ensure_ascii=False)[:300]}")
+
+    def reply(text):
+        lark_webhook.send_lark_text_with_receive_id_type(open_id, "open_id", text)
 
     # ── File message (PDF) ──
     if msg_type == "file":
         file_key = content.get("file_key", "")
+        file_name = content.get("file_name", "")
+        print(f"[LARK] file_key={file_key}, file_name={file_name}")
 
         if not file_key:
+            reply("❌ 收到文件但无法获取文件标识，请重新发送。")
             return JSONResponse({"code": 0, "msg": "no file_key"})
 
         # Download file from Lark
@@ -553,15 +567,17 @@ async def lark_handle_message(event):
                 headers={"Authorization": f"Bearer {token}"},
                 timeout=60
             )
-            print(f"[LARK] File download status: {resp.status_code}")
+            print(f"[LARK] File download status: {resp.status_code}, size={len(resp.content)}")
         except Exception as e:
             print(f"[LARK] File download error: {e}")
-            lark_webhook.send_lark_text_with_receive_id_type(open_id, "open_id", "❌ 下載文件失敗，請稍後再試。")
+            reply(f"❌ 下载文件失败: {e}")
             return JSONResponse({"code": 1, "msg": str(e)})
 
         if resp.status_code != 200:
-            lark_webhook.send_lark_text_with_receive_id_type(open_id, "open_id", "❌ 文件獲取失敗。")
-            return JSONResponse({"code": 1, "msg": f"HTTP {resp.status_code}"})
+            err_detail = resp.text[:200] if resp.text else f"HTTP {resp.status_code}"
+            print(f"[LARK] File download failed: {err_detail}")
+            reply(f"❌ 文件获取失败 ({resp.status_code})。请确认应用有 im:resource 权限。")
+            return JSONResponse({"code": 1, "msg": err_detail})
 
         # Save as PDF
         with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
@@ -569,6 +585,7 @@ async def lark_handle_message(event):
             pdf_path = f.name
 
         print(f"[LARK] PDF saved: {pdf_path}, size={len(resp.content)}")
+        reply(f"📥 已收到文件「{file_name or 'PDF'}」，正在解析...")
 
         # Process PDF
         try:
@@ -576,8 +593,11 @@ async def lark_handle_message(event):
             print(f"[LARK] Parsed {len(results)} records from PDF")
 
             if not any(r.get("name") or r.get("license_plate") or r.get("policy_number") for r in results):
-                lark_webhook.send_lark_text_with_receive_id_type(open_id, "open_id",
-                    "📋 已收到 PDF，但無法自動識別內容。\n\n請在 CRM 系統中手動新增記錄。")
+                reply(
+                    "📋 已收到 PDF，但无法自动识别内容。\n\n"
+                    "请在 CRM 系统中手动新增记录。\n"
+                    f"🔗 https://smartquote-crm.onrender.com/renewals"
+                )
                 return JSONResponse({"code": 0, "msg": "No identifiable data"})
 
             saved_records = []
@@ -591,15 +611,16 @@ async def lark_handle_message(event):
                 else:
                     saved_records.append(f"❌ {info.get('name','未知')}: {result.get('error','失敗')}")
 
-            reply = "📋 **PDF 自動入庫結果**\n\n" + "\n".join(saved_records)
-            reply += "\n\n請在 CRM 系統中確認資料是否正確。"
-            reply += f"\n\n🔗 https://smartquote-crm.onrender.com/renewals"
+            reply_text = "📋 **PDF 自动入库结果**\n\n" + "\n".join(saved_records)
+            reply_text += "\n\n请在 CRM 系统中确认资料是否正确。"
+            reply_text += f"\n\n🔗 https://smartquote-crm.onrender.com/renewals"
 
-            lark_webhook.send_lark_text_with_receive_id_type(open_id, "open_id", reply)
+            reply(reply_text)
 
         except Exception as e:
-            print(f"[LARK] PDF processing error: {e}")
-            lark_webhook.send_lark_text_with_receive_id_type(open_id, "open_id", f"❌ 處理 PDF 時發生錯誤: {e}")
+            import traceback
+            print(f"[LARK] PDF processing error: {e}\n{traceback.format_exc()}")
+            reply(f"❌ 处理 PDF 时发生错误: {e}")
         finally:
             os.unlink(pdf_path)
 
@@ -607,19 +628,25 @@ async def lark_handle_message(event):
     elif msg_type == "text":
         text = content.get("text", "").strip().lower()
 
-        if text in ["help", "幫助", "/help", "?"]:
+        if text in ["help", "幫助", "帮助", "/help", "?"]:
             help_text = (
-                "📋 **PDF保單Bot 使用說明**\n\n"
-                "直接發送 PDF 文件給我，我會自動：\n"
-                "1️⃣ 解析 PDF 內容\n"
-                "2️⃣ 識別客戶姓名、車牌、保費等\n"
-                "3️⃣ 自動存入 CRM 系統\n\n"
-                "支援：續保通知書、保單文件、港車北上文件"
+                "📋 **PDF保单Bot 使用说明**\n\n"
+                "直接发送 PDF 文件给我，我会自动：\n"
+                "1️⃣ 解析 PDF 内容\n"
+                "2️⃣ 识别客户姓名、车牌、保费等\n"
+                "3️⃣ 自动存入 CRM 系统\n\n"
+                "支持：续保通知书、保单文件、港车北上文件"
             )
-            lark_webhook.send_lark_text_with_receive_id_type(open_id, "open_id", help_text)
+            reply(help_text)
         else:
-            lark_webhook.send_lark_text_with_receive_id_type(open_id, "open_id",
-                "😊 請直接發送 PDF 文件給我處理\n"
-                "輸入「幫助」查看使用說明")
+            reply(
+                "😊 请直接发送 PDF 文件给我处理\n"
+                "输入「帮助」查看使用说明"
+            )
+
+    # ── Unhandled message type ──
+    else:
+        print(f"[LARK] Unhandled msg_type: {msg_type}")
+        reply(f"收到消息类型: {msg_type}，请直接发送 PDF 文件。")
 
     return JSONResponse({"code": 0, "msg": "ok"})
