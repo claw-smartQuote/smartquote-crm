@@ -1,6 +1,7 @@
 """FastAPI main app for Insurance CRM Web."""
 import os
 import json
+import time
 from pathlib import Path
 from datetime import date
 import openpyxl
@@ -493,6 +494,13 @@ import lark_webhook
 from fastapi import Query
 import tempfile
 
+# Debug: store last 20 webhook requests
+_webhook_log = []
+
+@app.get("/debug/webhook-log")
+def debug_webhook_log():
+    return {"count": len(_webhook_log), "logs": _webhook_log[-20:]}
+
 @app.get("/webhook/lark")
 async def lark_webhook_verify(request: Request, challenge: str = Query(None)):
     """Lark Webhook URL 驗證"""
@@ -519,6 +527,17 @@ async def lark_webhook_event(request: Request):
 
     print(f"[LARK WEBHOOK] Event: {event_type}")
     print(f"[LARK WEBHOOK] Body: {json.dumps(body, ensure_ascii=False)[:500]}")
+
+    # Debug log
+    _webhook_log.append({
+        "ts": time.strftime("%H:%M:%S"),
+        "event_type": event_type,
+        "schema": body.get("schema", ""),
+        "has_event": bool(event_data),
+        "body_preview": json.dumps(body, ensure_ascii=False)[:500],
+    })
+    if len(_webhook_log) > 50:
+        _webhook_log.pop(0)
 
     if event_type == "im.message.receive_v1":
         return await lark_handle_message(event_data)
