@@ -6,3 +6,5 @@ psycopg2-binary==2.9.9
 python-multipart==0.0.6
 openpyxl==3.1.2
 httpx>=0.25.0
+websockets>=12.0
+lark-oapi==1.6.8
