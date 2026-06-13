@@ -40,6 +40,21 @@ templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 def health_check():
     return {"status": "ok", "service": "smartquote-crm"}
 
+@app.get("/debug-db-url")
+def debug_db_url():
+    """TEMP: reveal DATABASE_URL (masked) to debug connection issues."""
+    import database
+    url = database.DATABASE_URL
+    # Mask password
+    if "@" in url:
+        parts = url.split("@", 1)
+        user_pass = parts[0]
+        if ":" in user_pass:
+            uparts = user_pass.split(":", 1)
+            masked = f"{uparts[0]}:{'*'*len(uparts[1])}"
+            url = masked + "@" + parts[1]
+    return {"database_url": url, "is_postgres": database._is_postgres, "engine": str(type(database.engine).__name__)}
+
 @app.on_event("startup")
 def startup():
     try:
