@@ -425,3 +425,270 @@ def send_lark_text_with_receive_id_type(receive_id, receive_id_type, text):
         timeout=60
     )
     return resp.json()
+
+
+# ── Lark WebSocket Long-Connection Client ──────────────────────────────────────
+import asyncio, threading, websockets, traceback, requests
+
+_ws_loop = None
+_ws_thread = None
+
+# Lark WS endpoint (SDK uses POST /callback/ws/endpoint)
+_LARK_WS_ENDPOINT = "/callback/ws/endpoint"
+_LARK_WS_DOMAIN = "https://open.larksuite.com"
+
+async def _lark_ws_reader():
+    """Connect to Lark WebSocket and process incoming events."""
+    import tempfile, os as _os
+
+    while True:
+        try:
+            # Step 1: Get WebSocket URL from Lark
+            resp = requests.post(
+                _LARK_WS_DOMAIN + _LARK_WS_ENDPOINT,
+                headers={"Locale": "zh", "User-Agent": "lark-oapi-python/2.0"},
+                json={"AppID": LARK_APP_ID, "AppSecret": LARK_APP_SECRET},
+                timeout=30
+            )
+            data = resp.json()
+            if data.get("code") != 0:
+                print(f"[LARK WS] Get URL failed: {data.get('msg')}")
+                await asyncio.sleep(30)
+                continue
+
+            ws_url = data.get("data", {}).get("URL", "")
+            if not ws_url:
+                print("[LARK WS] No URL in response")
+                await asyncio.sleep(30)
+                continue
+
+            print(f"[LARK WS] Got URL: {ws_url[:80]}...")
+
+            # Step 2: Connect WebSocket
+            async with websockets.connect(ws_url, ping_interval=20, ping_timeout=15) as ws:
+                print("[LARK WS] ✓ Connected to Lark WebSocket")
+
+                # Step 3: Read + handle protobuf messages
+                while True:
+                    try:
+                        raw = await asyncio.wait_for(ws.recv(), timeout=60)
+                        _handle_ws_frame(raw)
+                    except asyncio.TimeoutError:
+                        try:
+                            await ws.ping()
+                        except:
+                            break
+                    except Exception as e:
+                        print(f"[LARK WS] Read error: {e}")
+                        break
+
+        except Exception as e:
+            print(f"[LARK WS] Connection error: {e}, retrying in 15s...")
+            traceback.print_exc()
+            await asyncio.sleep(15)
+
+
+def _handle_ws_frame(frame_bytes):
+    """Parse a Lark protobuf frame and dispatch to handler."""
+    try:
+        from lark_oapi.ws.pb.pbbp2_pb2 import Frame
+        from lark_oapi.ws.enum import FrameType, MessageType
+
+        frame = Frame()
+        frame.ParseFromString(frame_bytes)
+        ft = FrameType(frame.method)
+
+        if ft == FrameType.CONTROL:
+            # PING/PONG - just log
+            return
+
+        if ft == FrameType.DATA:
+            headers = frame.headers
+            type_key = None
+            for h in headers:
+                if h.key == "type":
+                    type_key = h.value
+                    break
+
+            msg_type = MessageType(type_key) if type_key else None
+            if msg_type == MessageType.EVENT:
+                payload = frame.payload.decode("utf-8") if frame.payload else "{}"
+                event = json.loads(payload)
+                print(f"[LARK WS] Event: {json.dumps(event, ensure_ascii=False)[:300]}")
+                _handle_lark_ws_event(event)
+            return
+
+    except Exception as e:
+        print(f"[LARK WS] Frame parse error: {e}")
+        traceback.print_exc()
+
+
+def _handle_lark_ws_event(event):
+    """Handle a Lark WebSocket event - dispatch to the right handler."""
+    try:
+        event_type = event.get("event_type", "") or event.get("header", {}).get("event_type", "")
+        event_data = event.get("event", {})
+
+        # URL verification challenge
+        challenge = event.get("challenge", "")
+        if challenge and event.get("type") == "url_verification":
+            print(f"[LARK WS] Challenge: {challenge}")
+            return
+
+        print(f"[LARK WS] Event: {event_type}")
+
+        if event_type == "im.message.receive_v1":
+            _handle_lark_message_ws(event_data)
+        else:
+            print(f"[LARK WS] Unhandled event type: {event_type}")
+
+    except Exception as e:
+        print(f"[LARK WS] Handler error: {e}")
+        traceback.print_exc()
+
+
+def _handle_lark_message_ws(event_data):
+    """Handle im.message.receive_v1 from WebSocket."""
+    import tempfile, os as _os
+
+    message = event_data.get("message", {})
+    msg_type = message.get("msg_type", "")
+    msg_id = message.get("message_id", "")
+    sender = event_data.get("sender", {})
+    sender_id = sender.get("sender_id", {})
+    open_id = sender_id.get("open_id", "")
+
+    try:
+        content = json.loads(message.get("content", "{}"))
+    except:
+        content = {}
+
+    print(f"[LARK WS] msg_type={msg_type}, msg_id={msg_id}, open_id={open_id}")
+
+    def reply(text):
+        r = send_lark_text_with_receive_id_type(open_id, "open_id", text)
+        print(f"[LARK WS] Reply result: {r}")
+
+    # ── File message (PDF) ──
+    if msg_type == "file":
+        file_key = content.get("file_key", "")
+        file_name = content.get("file_name", "")
+        print(f"[LARK WS] file_key={file_key}, file_name={file_name}")
+
+        if not file_key:
+            reply("❌ 收到文件但无法获取文件标识，请重新发送。")
+            return
+
+        # Download file
+        try:
+            token = get_tenant_token()
+            resp = httpx.get(
+                f"{LARK_API_BASE}/im/v1/messages/{msg_id}/resources/{file_key}",
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=60
+            )
+            print(f"[LARK WS] File download: {resp.status_code}, size={len(resp.content)}")
+        except Exception as e:
+            print(f"[LARK WS] File download error: {e}")
+            reply(f"❌ 下载文件失败: {e}")
+            return
+
+        if resp.status_code != 200:
+            reply(f"❌ 文件获取失败 ({resp.status_code})。请确认应用有 im:resource 权限。")
+            return
+
+        # Save as PDF
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
+            f.write(resp.content)
+            pdf_path = f.name
+
+        print(f"[LARK WS] PDF saved: {pdf_path}")
+        reply(f"📥 已收到文件「{file_name or 'PDF'}」，正在解析...")
+
+        # Process PDF
+        try:
+            results = process_pdf(pdf_path)
+            print(f"[LARK WS] Parsed {len(results)} records from PDF")
+
+            if not any(r.get("name") or r.get("license_plate") or r.get("policy_number") for r in results):
+                reply(
+                    "📋 已收到 PDF，但无法自动识别内容。\n\n"
+                    "请在 CRM 系统中手动新增记录。\n"
+                    f"🔗 {CRM_URL}/renewals"
+                )
+                _os.unlink(pdf_path)
+                return
+
+            saved_count = 0
+            for info in results:
+                result = save_to_crm(info)
+                if result.get("ok"):
+                    saved_count += 1
+                    print(f"[LARK WS] Saved: {result}")
+
+            if saved_count > 0:
+                reply(
+                    f"✅ 成功解析並存入 CRM（共 {saved_count} 筆記錄）！\n"
+                    f"📊 查看續保列表：{CRM_URL}/renewals"
+                )
+            else:
+                reply("⚠️ 未能自動識別有效資料，請手動新增。")
+
+        except Exception as e:
+            print(f"[LARK WS] Process error: {e}")
+            traceback.print_exc()
+            reply(f"❌ 解析失敗: {e}")
+        finally:
+            try:
+                _os.unlink(pdf_path)
+            except:
+                pass
+        return
+
+    # ── Text message ──
+    if msg_type == "text":
+        text_content = content.get("text", "").strip()
+        print(f"[LARK WS] Text: {text_content}")
+
+        if not text_content:
+            return
+
+        # Quick commands
+        if text_content in ["/help", "幫助", "help"]:
+            reply(
+                "📋 PDF BOT 使用說明：\n\n"
+                "• 發送 PDF 文件給我 → 自動解析並入庫\n"
+                "• 發送任何續保通知書 PDF 即可\n"
+                "• 等待解析完成後回覆結果\n\n"
+                f"🌐 CRM 系統：{CRM_URL}"
+            )
+            return
+
+        reply(
+            f"收到你的消息：「{text_content[:50]}」\n\n"
+            f"📎 請發送續保通知書 PDF 文件給我，我會自動幫你入庫！\n"
+            f"🌐 或直接登入：{CRM_URL}/renewals"
+        )
+        return
+
+    # Other message types
+    reply(f"收到「{msg_type}」類型的消息，請發送 PDF 文件。")
+
+
+def start_lark_ws_background():
+    """Start the Lark WebSocket client in a background thread."""
+    global _ws_loop, _ws_thread
+    if _ws_thread and _ws_thread.is_alive():
+        print("[LARK WS] Already running")
+        return
+
+    def run_loop():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        _ws_loop = loop
+        print("[LARK WS] Starting WebSocket client...")
+        loop.run_until_complete(_lark_ws_reader())
+
+    _ws_thread = threading.Thread(target=run_loop, daemon=True, name="LarkWS")
+    _ws_thread.start()
+    print("[LARK WS] Background thread started")

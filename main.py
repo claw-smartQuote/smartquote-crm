@@ -52,6 +52,10 @@ def startup():
         print(f"[startup] init_sample_data error: {e}")
     if os.environ.get("ICLOUD_BACKUP_ENABLED", "0") == "1":
         icloud_backup.start_auto_backup(6)
+    # Start Lark WebSocket long-connection client
+    if os.environ.get("LARK_WS_ENABLED", "1") != "0":
+        import lark_webhook
+        lark_webhook.start_lark_ws_background()
 
 # ── Pages ───────────────────────────────────────────────────────────────────
 @app.get("/", response_class=HTMLResponse)
