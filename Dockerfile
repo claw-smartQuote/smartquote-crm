@@ -1,8 +1,11 @@
 FROM python:3.11-slim
 
-# Install poppler-utils for pdftotext/pdfinfo (PDF text extraction)
+# Install poppler-utils for pdftotext/pdfinfo + tesseract for OCR
 RUN apt-get update && apt-get install -y --no-install-recommends \
     poppler-utils \
+    tesseract-ocr \
+    tesseract-ocr-chi-tra \
+    tesseract-ocr-eng \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

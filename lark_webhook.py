@@ -143,7 +143,69 @@ def extract_pdf_text(pdf_path):
     except Exception as e:
         print(f"[PDF] PyPDF2 also failed: {e}")
 
-    # Final fallback: Vision OCR (macOS) for scanned PDFs
+    # Fallback: pymupdf + pytesseract OCR (works on Linux/Render)
+    print("[PDF] Trying pymupdf + pytesseract OCR for scanned PDF...")
+    try:
+        import pymupdf
+        doc = pymupdf.open(str(pdf_path))
+        print(f"[PDF] pymupdf opened: {len(doc)} pages")
+        ocr_texts = []
+        for page_num, page in enumerate(doc):
+            pix = page.get_pixmap(matrix=pymupdf.Matrix(2, 2))
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                pix.save(tmp.name)
+                tmp_path = tmp.name
+
+            ocr_success = False
+            # Try pytesseract
+            try:
+                import pytesseract
+                from PIL import Image
+                img_pil = Image.open(tmp_path)
+                text = pytesseract.image_to_string(img_pil, lang='chi_tra+eng')
+                if text.strip():
+                    ocr_texts.append(text)
+                    ocr_success = True
+                    print(f"[PDF] pytesseract OCR page {page_num+1}: {len(text)} chars")
+            except ImportError:
+                print("[PDF] pytesseract not available")
+            except Exception as e:
+                print(f"[PDF] pytesseract failed: {e}")
+
+            # Try Lark OCR as fallback
+            if not ocr_success:
+                try:
+                    import base64
+                    token = get_tenant_token()
+                    with open(tmp_path, "rb") as f:
+                        img_b64 = base64.b64encode(f.read()).decode()
+                    resp = httpx.post(
+                        f"{LARK_API_BASE}/optical_char_recognition/v1/image/basic_recognize",
+                        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                        json={"image": img_b64},
+                        timeout=120
+                    )
+                    data = resp.json()
+                    if data.get("code") == 0:
+                        ocr_text = data.get("data", {}).get("text", "")
+                        if ocr_text.strip():
+                            ocr_texts.append(ocr_text)
+                            ocr_success = True
+                            print(f"[PDF] Lark OCR page {page_num+1}: {len(ocr_text)} chars")
+                    else:
+                        print(f"[PDF] Lark OCR error: code={data.get('code')}, msg={data.get('msg')}")
+                except Exception as e:
+                    print(f"[PDF] Lark OCR failed: {e}")
+
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+
+        if ocr_texts:
+            return "\n\n".join(ocr_texts)
+    except Exception as e:
+        print(f"[PDF] pymupdf OCR failed: {e}")
+
+    # Final fallback: Vision OCR (macOS only) for scanned PDFs
     text = _vision_ocr_pdf(pdf_path)
     if text:
         return text
