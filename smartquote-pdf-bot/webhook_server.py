@@ -482,8 +482,28 @@ def process_pdf(pdf_path):
                 if info["name"] or info["license_plate"] or info["policy_number"]:
                     results.append(info)
     
-    # If nothing found, create one empty record for manual entry
+    # If nothing found, try to extract images from PDF for manual review
     if not results:
+        print("[PDF] No text data found, extracting images for manual review...")
+        try:
+            import pymupdf
+            doc = pymupdf.open(str(pdf_path))
+            images = []
+            for page_num, page in enumerate(doc):
+                # Render page as image
+                pix = page.get_pixmap(matrix=pymupdf.Matrix(2, 2))  # 2x zoom for better quality
+                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                    pix.save(tmp.name)
+                    images.append(tmp.name)
+                    print(f"[PDF] Extracted page {page_num+1} as image: {tmp.name}")
+            
+            if images:
+                # Return special result indicating images were extracted
+                return [{"images": images, "page_count": len(images), "needs_manual_review": True}]
+        except Exception as e:
+            print(f"[PDF] Image extraction failed: {e}")
+        
+        # Fallback: return empty record
         results.append(parse_renewal_text("", 1))
     
     return results
