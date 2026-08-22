@@ -209,36 +209,42 @@ def extract_pdf_text(pdf_path):
         doc = pymupdf.open(str(pdf_path))
         ocr_texts = []
         for page_num, page in enumerate(doc):
-            images = page.get_images()
-            if images:
-                # Extract the first image from each page
-                for img in images:
-                    xref = img[0]
-                    pix = pymupdf.Pixmap(doc, xref)
-                    # Save to temp file for OCR
-                    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-                        pix.save(tmp.name)
-                        tmp_path = tmp.name
+            # Render page as image (2x zoom for better OCR accuracy)
+            pix = page.get_pixmap(matrix=pymupdf.Matrix(2, 2))
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                pix.save(tmp.name)
+                tmp_path = tmp.name
 
-                    # Try pytesseract OCR
-                    ocr_success = False
-                    try:
-                        import pytesseract
-                        from PIL import Image
-                        img_pil = Image.open(tmp_path)
-                        text = pytesseract.image_to_string(img_pil, lang='chi_tra+eng')
-                        if text.strip():
-                            ocr_texts.append(text)
-                            ocr_success = True
-                            print(f"[PDF] pytesseract OCR page {page_num+1}: {len(text)} chars")
-                    except ImportError:
-                        print("[PDF] pytesseract not available...")
-                    except Exception as e:
-                        print(f"[PDF] pytesseract failed: {e}")
+            # Try pytesseract OCR
+            ocr_success = False
+            try:
+                import pytesseract
+                from PIL import Image
+                img_pil = Image.open(tmp_path)
+                text = pytesseract.image_to_string(img_pil, lang='chi_tra+eng')
+                if text.strip():
+                    ocr_texts.append(text)
+                    ocr_success = True
+                    print(f"[PDF] pytesseract OCR page {page_num+1}: {len(text)} chars")
+            except ImportError:
+                print("[PDF] pytesseract not available...")
+            except Exception as e:
+                print(f"[PDF] pytesseract failed: {e}")
 
-                    # Cleanup temp file
-                    if os.path.exists(tmp_path):
-                        os.unlink(tmp_path)
+            # Try Lark OCR as fallback
+            if not ocr_success:
+                try:
+                    lark_text = lark_ocr_image(tmp_path)
+                    if lark_text.strip():
+                        ocr_texts.append(lark_text)
+                        ocr_success = True
+                        print(f"[PDF] Lark OCR page {page_num+1}: {len(lark_text)} chars")
+                except Exception as e:
+                    print(f"[PDF] Lark OCR failed: {e}")
+
+            # Cleanup temp file
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
 
         if ocr_texts:
             return "\n\n".join(ocr_texts)
@@ -482,8 +488,28 @@ def process_pdf(pdf_path):
                 if info["name"] or info["license_plate"] or info["policy_number"]:
                     results.append(info)
     
-    # If nothing found, create one empty record for manual entry
+    # If nothing found, try to extract images from PDF for manual review
     if not results:
+        print("[PDF] No text data found, extracting images for manual review...")
+        try:
+            import pymupdf
+            doc = pymupdf.open(str(pdf_path))
+            images = []
+            for page_num, page in enumerate(doc):
+                # Render page as image
+                pix = page.get_pixmap(matrix=pymupdf.Matrix(2, 2))  # 2x zoom for better quality
+                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                    pix.save(tmp.name)
+                    images.append(tmp.name)
+                    print(f"[PDF] Extracted page {page_num+1} as image: {tmp.name}")
+            
+            if images:
+                # Return special result indicating images were extracted
+                return [{"images": images, "page_count": len(images), "needs_manual_review": True}]
+        except Exception as e:
+            print(f"[PDF] Image extraction failed: {e}")
+        
+        # Fallback: return empty record
         results.append(parse_renewal_text("", 1))
     
     return results
@@ -630,40 +656,39 @@ async def handle_message(event):
             print(f"[LARK] Parsed {len(results)} records from PDF")
             
             if not any(r.get("name") or r.get("license_plate") or r.get("policy_number") for r in results):
-                # Try to extract image from PDF and send to user for verification
+                # Try to render PDF page as image and send to user
                 try:
                     import pymupdf
                     doc = pymupdf.open(pdf_path)
                     if len(doc) > 0:
                         page = doc[0]
-                        images = page.get_images()
-                        if images:
-                            xref = images[0][0]
-                            pix = pymupdf.Pixmap(doc, xref)
-                            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-                                pix.save(tmp.name)
-                                tmp_path = tmp.name
+                        # Render page as image (works for both text and scanned PDFs)
+                        pix = page.get_pixmap(matrix=pymupdf.Matrix(2, 2))
+                        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                            pix.save(tmp.name)
+                            tmp_path = tmp.name
 
-                            # Upload image to Lark
-                            with open(tmp_path, "rb") as f:
-                                upload_resp = httpx.post(
-                                    f"{LARK_API_BASE}/im/v1/images",
-                                    headers={"Authorization": f"Bearer {token}"},
-                                    files={"image": ("pdf_page.png", f, "image/png")},
-                                    data={"image_type": "message"},
-                                    timeout=30
-                                )
-                            upload_data = upload_resp.json()
-                            if upload_data.get("code") == 0:
-                                image_key = upload_data["data"]["image_key"]
-                                # Send image message
-                                lark_post("/im/v1/messages", {
-                                    "receive_id": open_id,
-                                    "msg_type": "image",
-                                    "content": json.dumps({"image_key": image_key})
-                                })
+                        # Upload image to Lark
+                        with open(tmp_path, "rb") as f:
+                            upload_resp = httpx.post(
+                                f"{LARK_API_BASE}/im/v1/images",
+                                headers={"Authorization": f"Bearer {token}"},
+                                files={"image": ("pdf_page.png", f, "image/png")},
+                                data={"image_type": "message"},
+                                timeout=30
+                            )
+                        upload_data = upload_resp.json()
+                        print(f"[LARK] Image upload response: {upload_data}")
+                        if upload_data.get("code") == 0:
+                            image_key = upload_data["data"]["image_key"]
+                            # Send image message
+                            lark_post("/im/v1/messages", {
+                                "receive_id": open_id,
+                                "msg_type": "image",
+                                "content": json.dumps({"image_key": image_key})
+                            })
 
-                            os.unlink(tmp_path)
+                        os.unlink(tmp_path)
                 except Exception as e:
                     print(f"[LARK] Failed to send PDF image: {e}")
 
@@ -714,6 +739,13 @@ async def handle_message(event):
                 "😊 請直接發送 PDF 文件給我處理\n"
                 "輸入「幫助」查看使用說明"
             )
+    
+    # ── Default handler for unknown message types ──
+    else:
+        print(f"[LARK] Unknown message type: {msg_type}")
+        send_lark_text(DEFAULT_CHAT_ID, "chat_id", 
+            f"收到「{msg_type}」類型的消息，請發送 PDF 文件。"
+        )
     
     return JSONResponse({"code": 0, "msg": "ok"})
 
