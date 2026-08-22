@@ -3,3 +3,10 @@ __pycache__/
 *.pyo
 *.db
 .backup_status.json
+
+.venv/
+venv/
+node_modules/
+*.dylib
+*.so
+*.node
