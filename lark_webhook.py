@@ -1,22 +1,31 @@
 """
-Feishu/Lark PDF Bot - Webhook Handler
+Feishu PDF Bot - Webhook Server
 接收 Lark 發送的消息和文件，自動解析 PDF 並入庫至 CRM
 """
 import os
+import sys
 import json
+import asyncio
 import tempfile
 import subprocess
 import re
+import shutil
+from pathlib import Path
 from datetime import datetime
+from fastapi import FastAPI, Request, Query
+from fastapi.responses import JSONResponse
 import httpx
 import urllib.request
 import urllib.parse
 
 # ── Config ────────────────────────────────────────────────────────────────────
 LARK_API_BASE = "https://open.larksuite.com/open-apis"
-LARK_APP_ID = os.environ.get("LARK_APP_ID", "cli_aaa0809c34389e18")
-LARK_APP_SECRET = os.environ.get("LARK_APP_SECRET", "r0az2k1jETYxHF2DxiR0MbcukUkKQZFU")
+LARK_APP_ID = "cli_aaa0809c34389e18"
+LARK_APP_SECRET = "r0az2k1jETYxHF2DxiR0MbcukUkKQZFU"
 CRM_URL = os.environ.get("CRM_URL", "https://smartquote-crm.onrender.com")
+
+# ── FastAPI App ────────────────────────────────────────────────────────────────
+app = FastAPI(title="Feishu PDF Bot Webhook")
 
 # ── Lark Token Cache ──────────────────────────────────────────────────────────
 _tenant_token = {"token": None, "expires_at": 0}
@@ -25,7 +34,7 @@ def get_tenant_token():
     now = datetime.now().timestamp()
     if _tenant_token["token"] and _tenant_token["expires_at"] > now:
         return _tenant_token["token"]
-
+    
     resp = httpx.post(
         f"{LARK_API_BASE}/auth/v3/tenant_access_token/internal",
         json={"app_id": LARK_APP_ID, "app_secret": LARK_APP_SECRET},
@@ -34,11 +43,33 @@ def get_tenant_token():
     data = resp.json()
     if data.get("code") != 0:
         raise Exception(f"Lark auth failed: {data}")
-
+    
     _tenant_token["token"] = data["tenant_access_token"]
     _tenant_token["expires_at"] = now + data.get("expire", 7200) - 120
     print(f"[LARK] Token refreshed, expires in {data.get('expire', 7200)}s")
     return _tenant_token["token"]
+
+# ── Lark API Helpers ───────────────────────────────────────────────────────────
+def lark_get(path, params=None):
+    token = get_tenant_token()
+    resp = httpx.get(
+        f"{LARK_API_BASE}{path}",
+        headers={"Authorization": f"Bearer {token}"},
+        params=params,
+        timeout=30
+    )
+    return resp.json()
+
+def lark_post(path, json_data=None):
+    token = get_tenant_token()
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    resp = httpx.post(
+        f"{LARK_API_BASE}{path}",
+        headers=headers,
+        json=json_data,
+        timeout=60
+    )
+    return resp.json()
 
 # ── CRM API Helpers ────────────────────────────────────────────────────────────
 def crm_api_post(endpoint, fields):
@@ -98,22 +129,124 @@ def crm_create_renewal(
         "status": "pending"
     })
 
-# ── PDF Processing ──────────────────────────────────────────────────────────────
+# ── PDF Processing ────────────────────────────────────────────────────────────
+def lark_ocr_image(image_path):
+    """Use Lark AI to analyze image and extract text"""
+    try:
+        import base64
+        token = get_tenant_token()
+        with open(image_path, "rb") as f:
+            image_data = base64.b64encode(f.read()).decode()
+
+        # Use Lark's image recognition API
+        resp = httpx.post(
+            f"{LARK_API_BASE}/image/v1/recognize",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={
+                "image": image_data,
+                "type": "text"
+            },
+            timeout=120
+        )
+        data = resp.json()
+        print(f"[LARK OCR] Response: {data}")
+        if data.get("code") == 0:
+            results = data.get("data", {}).get("results", [])
+            texts = [r.get("text", "") for r in results if r.get("text")]
+            return "\n".join(texts)
+        else:
+            print(f"[LARK OCR] API error: {data}")
+            # Try alternative endpoint
+            resp2 = httpx.post(
+                f"{LARK_API_BASE}/optical_char_recognition/v1/image/basic_recognize",
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                json={"image": image_data},
+                timeout=60
+            )
+            data2 = resp2.json()
+            print(f"[LARK OCR] Fallback response: {data2}")
+            if data2.get("code") == 0:
+                return data2.get("data", {}).get("text", "")
+    except Exception as e:
+        print(f"[LARK OCR] Failed: {e}")
+    return ""
+
 def extract_pdf_text(pdf_path):
-    """Extract text from PDF using pdftotext"""
+    """Extract text from PDF — try pdftotext, PyPDF2, then OCR for scanned PDFs"""
+    # Try pdftotext (available on Render with poppler)
     try:
         result = subprocess.run(
             ["pdftotext", "-layout", str(pdf_path), "-"],
             capture_output=True, text=True, timeout=30
         )
-        if result.returncode == 0:
+        if result.returncode == 0 and result.stdout.strip():
             return result.stdout
+    except Exception:
+        pass
+
+    # Fallback: PyPDF2
+    try:
+        from PyPDF2 import PdfReader
+        reader = PdfReader(str(pdf_path))
+        texts = []
+        for page in reader.pages:
+            t = page.extract_text()
+            if t:
+                texts.append(t)
+        text = "\n".join(texts)
+        if text.strip():
+            return text
     except Exception as e:
-        print(f"[PDF] pdftotext failed: {e}")
+        print(f"[PDF] PyPDF2 extract failed: {e}")
+
+    # OCR fallback for scanned/image-based PDFs
+    print("[PDF] No text found, trying OCR for scanned PDF...")
+    try:
+        import pymupdf
+        doc = pymupdf.open(str(pdf_path))
+        ocr_texts = []
+        for page_num, page in enumerate(doc):
+            images = page.get_images()
+            if images:
+                # Extract the first image from each page
+                for img in images:
+                    xref = img[0]
+                    pix = pymupdf.Pixmap(doc, xref)
+                    # Save to temp file for OCR
+                    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                        pix.save(tmp.name)
+                        tmp_path = tmp.name
+
+                    # Try pytesseract OCR
+                    ocr_success = False
+                    try:
+                        import pytesseract
+                        from PIL import Image
+                        img_pil = Image.open(tmp_path)
+                        text = pytesseract.image_to_string(img_pil, lang='chi_tra+eng')
+                        if text.strip():
+                            ocr_texts.append(text)
+                            ocr_success = True
+                            print(f"[PDF] pytesseract OCR page {page_num+1}: {len(text)} chars")
+                    except ImportError:
+                        print("[PDF] pytesseract not available...")
+                    except Exception as e:
+                        print(f"[PDF] pytesseract failed: {e}")
+
+                    # Cleanup temp file
+                    if os.path.exists(tmp_path):
+                        os.unlink(tmp_path)
+
+        if ocr_texts:
+            return "\n\n".join(ocr_texts)
+    except Exception as e:
+        print(f"[PDF] OCR extraction failed: {e}")
+
     return ""
 
 def get_pdf_page_count(pdf_path):
     """Get number of pages in PDF"""
+    # Try pdfinfo first
     try:
         result = subprocess.run(
             ["pdfinfo", str(pdf_path)],
@@ -122,6 +255,12 @@ def get_pdf_page_count(pdf_path):
         for line in result.stdout.split("\n"):
             if "Pages:" in line:
                 return int(line.split(":")[-1].strip())
+    except:
+        pass
+    # Fallback: PyPDF2
+    try:
+        from PyPDF2 import PdfReader
+        return len(PdfReader(str(pdf_path)).pages)
     except:
         pass
     return 1
@@ -154,10 +293,10 @@ def parse_renewal_text(text, page_num=1):
         "insurance_company": "永誠保險",
         "notes": ""
     }
-
+    
     if not text.strip():
         return info
-
+    
     # Extract name
     name_patterns = [
         r"客戶姓名[：:]\s*([^\n]{2,20})",
@@ -170,7 +309,7 @@ def parse_renewal_text(text, page_num=1):
         if m:
             info["name"] = m.group(1).strip()
             break
-
+    
     # Extract phone
     phone_patterns = [
         r"電話[：:]\s*([0-9\s\-]{8,15})",
@@ -181,9 +320,9 @@ def parse_renewal_text(text, page_num=1):
     for pat in phone_patterns:
         m = re.search(pat, text, re.IGNORECASE)
         if m:
-            info["phone"] = m.group(0).strip()
+            info["phone"] = m.group(1).strip()
             break
-
+    
     # Extract license plate
     plate_patterns = [
         r"[粵粤]?\s*[A-Z]{1,3}[\s\-]?[0-9]{1,4}[\s\-]?[A-Z0-9]*",
@@ -198,7 +337,7 @@ def parse_renewal_text(text, page_num=1):
             if len(plate) >= 4:
                 info["license_plate"] = plate
                 break
-
+    
     # Extract policy number
     policy_patterns = [
         r"保單號碼[：:]\s*([A-Z0-9\-]{4,25})",
@@ -212,7 +351,7 @@ def parse_renewal_text(text, page_num=1):
         if m:
             info["policy_number"] = m.group(1).strip().upper()
             break
-
+    
     # Extract premium
     premium_patterns = [
         r"(?:保費|Premium)[^\$]*HK\$\s*([0-9,]+\.?\d*)",
@@ -226,7 +365,7 @@ def parse_renewal_text(text, page_num=1):
                 break
             except:
                 pass
-
+    
     # Extract sum insured
     si_patterns = [
         r"Sum\s*Insured[：:]*\s*HK\$\s*([0-9,]+\.?\d*)",
@@ -242,7 +381,7 @@ def parse_renewal_text(text, page_num=1):
                 break
             except:
                 pass
-
+    
     # Extract dates
     date_patterns = [
         (r"生效[日日期:：\s]*\s*(\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})", "effective_date"),
@@ -256,7 +395,7 @@ def parse_renewal_text(text, page_num=1):
         m = re.search(pat, text, re.IGNORECASE)
         if m:
             info[field] = parse_date(m.group(1))
-
+    
     # Extract vehicle model
     vehicle_patterns = [
         r"車型[：:]\s*([^\n]{3,40})",
@@ -269,7 +408,7 @@ def parse_renewal_text(text, page_num=1):
         if m:
             info["vehicle_model"] = m.group(1).strip()
             break
-
+    
     # Determine policy type
     text_lower = text.lower()
     if "comprehensive" in text_lower or "全保" in text:
@@ -284,14 +423,14 @@ def parse_renewal_text(text, page_num=1):
         info["policy_type"] = "兩地牌"
     else:
         info["policy_type"] = "其他"
-
+    
     # Extract NCB
     ncb_list = []
     for pat in [r"NCB\s*[：:]\s*(\d+)%", r"NCD\s*[：:]\s*(\d+)%", r"無索償折扣[：:]\s*(\d+)%"]:
         m = re.search(pat, text, re.IGNORECASE)
         if m:
             ncb_list.append(f"NCB: {m.group(1)}%")
-
+    
     # Extract excesses
     excess_map = [
         ("TPPD", r"TPPD[：:]*\s*HK\$\s*([0-9,]+\.?\d*)"),
@@ -309,7 +448,7 @@ def parse_renewal_text(text, page_num=1):
                 excess_list.append(f"{key}: HK${val:,.0f}")
             except:
                 pass
-
+    
     # Build notes
     notes_parts = []
     if ncb_list:
@@ -321,38 +460,40 @@ def parse_renewal_text(text, page_num=1):
     if info["vehicle_model"]:
         notes_parts.append(f"Model: {info['vehicle_model']}")
     info["notes"] = " | ".join(notes_parts)
-
+    
     return info
 
 def process_pdf(pdf_path):
     """Process PDF and return list of parsed records"""
     text = extract_pdf_text(pdf_path)
     page_count = get_pdf_page_count(pdf_path)
-
+    
     results = []
-
+    
     if text.strip():
+        # Split by form feed or page markers
         pages = re.split(r"\f|(?=\w+\s+\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})", text)
         for i, page_text in enumerate(pages[:page_count]):
             if page_text.strip():
                 info = parse_renewal_text(page_text, i+1)
                 if info["name"] or info["license_plate"] or info["policy_number"]:
                     results.append(info)
-
+    
+    # If nothing found, create one empty record for manual entry
     if not results:
         results.append(parse_renewal_text("", 1))
-
+    
     return results
 
-# ── Save to CRM ────────────────────────────────────────────────────────────────
+# ── Save to CRM ───────────────────────────────────────────────────────────────
 def save_to_crm(info):
     """Save parsed info to CRM, return result dict"""
     if not info.get("name") and not info.get("license_plate") and not info.get("policy_number"):
         return {"error": "無法識別任何資料"}
-
+    
     name = info.get("name") or "未知客戶"
     customer = crm_find_customer_by_name(name)
-
+    
     if not customer:
         result = crm_create_customer(name)
         if "error" in result:
@@ -360,9 +501,9 @@ def save_to_crm(info):
         customer = crm_find_customer_by_name(name)
         if not customer:
             return {"error": "客戶建立後找不到"}
-
+    
     cid = customer["id"]
-
+    
     result = crm_create_renewal(
         customer_id=cid,
         license_plate=info.get("license_plate", ""),
@@ -377,10 +518,10 @@ def save_to_crm(info):
         vehicle_model=info.get("vehicle_model", ""),
         phone=info.get("phone", "")
     )
-
+    
     if "error" in result:
         return {"error": f"建立續保記錄失敗: {result['error']}"}
-
+    
     return {
         "ok": True,
         "customer": customer["name"],
@@ -390,196 +531,67 @@ def save_to_crm(info):
         "premium": info.get("premium"),
     }
 
-# ── Lark Message Sending ──────────────────────────────────────────────────────
-def lark_post(path, json_data=None):
-    token = get_tenant_token()
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    resp = httpx.post(
-        f"{LARK_API_BASE}{path}",
-        headers=headers,
-        json=json_data,
-        timeout=60
-    )
-    return resp.json()
-
+# ── Lark Message Sending ─────────────────────────────────────────────────────
 def send_lark_text(receive_id, receive_id_type, text):
-    """Send text message to Lark user"""
-    return lark_post("/im/v1/messages", {
+    """Send text message to Lark user or chat"""
+    result = lark_post("/im/v1/messages", {
         "receive_id": receive_id,
         "msg_type": "text",
         "content": json.dumps({"text": text})
     })
+    return result
 
-def send_lark_text_with_receive_id_type(receive_id, receive_id_type, text):
-    """Send text message with explicit receive_id_type"""
-    token = get_tenant_token()
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    resp = httpx.post(
-        f"{LARK_API_BASE}/im/v1/messages?receive_id_type={receive_id_type}",
-        headers=headers,
-        json={
-            "receive_id": receive_id,
-            "msg_type": "text",
-            "content": json.dumps({"text": text})
-        },
-        timeout=60
-    )
-    return resp.json()
+# ── Webhook Endpoints ─────────────────────────────────────────────────────────
+@app.get("/webhook/lark")
+async def webhook_verify(request: Request, challenge: str = Query(None)):
+    """Lark Webhook URL 驗證"""
+    print(f"[LARK WEBHOOK] GET verification, challenge={challenge}")
+    return {"challenge": challenge}
 
-
-# ── Lark WebSocket Long-Connection Client ──────────────────────────────────────
-import asyncio, threading, websockets, traceback, requests
-
-_ws_loop = None
-_ws_thread = None
-
-# Lark WS endpoint (SDK uses POST /callback/ws/endpoint)
-_LARK_WS_ENDPOINT = "/callback/ws/endpoint"
-_LARK_WS_DOMAIN = "https://open.larksuite.com"
-
-async def _lark_ws_reader():
-    """Connect to Lark WebSocket and process incoming events."""
-    import tempfile, os as _os
-
-    while True:
-        try:
-            # Step 1: Get WebSocket URL from Lark
-            resp = requests.post(
-                _LARK_WS_DOMAIN + _LARK_WS_ENDPOINT,
-                headers={"Locale": "zh", "User-Agent": "lark-oapi-python/2.0"},
-                json={"AppID": LARK_APP_ID, "AppSecret": LARK_APP_SECRET},
-                timeout=30
-            )
-            data = resp.json()
-            if data.get("code") != 0:
-                print(f"[LARK WS] Get URL failed: {data.get('msg')}")
-                await asyncio.sleep(30)
-                continue
-
-            ws_url = data.get("data", {}).get("URL", "")
-            if not ws_url:
-                print("[LARK WS] No URL in response")
-                await asyncio.sleep(30)
-                continue
-
-            print(f"[LARK WS] Got URL: {ws_url[:80]}...")
-
-            # Step 2: Connect WebSocket
-            async with websockets.connect(ws_url, ping_interval=20, ping_timeout=15) as ws:
-                print("[LARK WS] ✓ Connected to Lark WebSocket")
-
-                # Step 3: Read + handle protobuf messages
-                while True:
-                    try:
-                        raw = await asyncio.wait_for(ws.recv(), timeout=60)
-                        _handle_ws_frame(raw)
-                    except asyncio.TimeoutError:
-                        try:
-                            await ws.ping()
-                        except:
-                            break
-                    except Exception as e:
-                        print(f"[LARK WS] Read error: {e}")
-                        break
-
-        except Exception as e:
-            print(f"[LARK WS] Connection error: {e}, retrying in 15s...")
-            traceback.print_exc()
-            await asyncio.sleep(15)
-
-
-def _handle_ws_frame(frame_bytes):
-    """Parse a Lark protobuf frame and dispatch to handler."""
+@app.post("/webhook/lark")
+async def webhook_lark(request: Request):
+    """Lark 消息 Webhook 端點"""
     try:
-        from lark_oapi.ws.pb.pbbp2_pb2 import Frame
-        from lark_oapi.ws.enum import FrameType, MessageType
+        body = await request.json()
+    except:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+    
+    event_type = body.get("event_type", "")
+    print(f"[LARK WEBHOOK] Event: {event_type}")
+    print(f"[LARK WEBHOOK] Body: {json.dumps(body, ensure_ascii=False)[:300]}")
+    
+    if event_type == "im.message.receive_v1":
+        return await handle_message(body.get("event", {}))
+    
+    return JSONResponse({"code": 0, "msg": "ok"})
 
-        frame = Frame()
-        frame.ParseFromString(frame_bytes)
-        ft = FrameType(frame.method)
-
-        if ft == FrameType.CONTROL:
-            # PING/PONG - just log
-            return
-
-        if ft == FrameType.DATA:
-            headers = frame.headers
-            type_key = None
-            for h in headers:
-                if h.key == "type":
-                    type_key = h.value
-                    break
-
-            msg_type = MessageType(type_key) if type_key else None
-            if msg_type == MessageType.EVENT:
-                payload = frame.payload.decode("utf-8") if frame.payload else "{}"
-                event = json.loads(payload)
-                print(f"[LARK WS] Event: {json.dumps(event, ensure_ascii=False)[:300]}")
-                _handle_lark_ws_event(event)
-            return
-
-    except Exception as e:
-        print(f"[LARK WS] Frame parse error: {e}")
-        traceback.print_exc()
-
-
-def _handle_lark_ws_event(event):
-    """Handle a Lark WebSocket event - dispatch to the right handler."""
-    try:
-        event_type = event.get("event_type", "") or event.get("header", {}).get("event_type", "")
-        event_data = event.get("event", {})
-
-        # URL verification challenge
-        challenge = event.get("challenge", "")
-        if challenge and event.get("type") == "url_verification":
-            print(f"[LARK WS] Challenge: {challenge}")
-            return
-
-        print(f"[LARK WS] Event: {event_type}")
-
-        if event_type == "im.message.receive_v1":
-            _handle_lark_message_ws(event_data)
-        else:
-            print(f"[LARK WS] Unhandled event type: {event_type}")
-
-    except Exception as e:
-        print(f"[LARK WS] Handler error: {e}")
-        traceback.print_exc()
-
-
-def _handle_lark_message_ws(event_data):
-    """Handle im.message.receive_v1 from WebSocket."""
-    import tempfile, os as _os
-
-    message = event_data.get("message", {})
+async def handle_message(event):
+    """處理收到的 Lark 消息"""
+    message = event.get("message", {})
     msg_type = message.get("msg_type", "")
     msg_id = message.get("message_id", "")
-    sender = event_data.get("sender", {})
+    chat_id = event.get("chat_id", "")
+    
+    # Get sender info
+    sender = event.get("sender", {})
     sender_id = sender.get("sender_id", {})
     open_id = sender_id.get("open_id", "")
-
+    
     try:
         content = json.loads(message.get("content", "{}"))
     except:
         content = {}
-
-    print(f"[LARK WS] msg_type={msg_type}, msg_id={msg_id}, open_id={open_id}")
-
-    def reply(text):
-        r = send_lark_text_with_receive_id_type(open_id, "open_id", text)
-        print(f"[LARK WS] Reply result: {r}")
-
+    
+    print(f"[LARK] msg_type={msg_type}, msg_id={msg_id}, chat_id={chat_id}")
+    
     # ── File message (PDF) ──
     if msg_type == "file":
         file_key = content.get("file_key", "")
-        file_name = content.get("file_name", "")
-        print(f"[LARK WS] file_key={file_key}, file_name={file_name}")
-
+        
         if not file_key:
-            reply("❌ 收到文件但无法获取文件标识，请重新发送。")
-            return
-
-        # Download file
+            return JSONResponse({"code": 0, "msg": "no file_key"})
+        
+        # Download file from Lark
         try:
             token = get_tenant_token()
             resp = httpx.get(
@@ -587,108 +599,130 @@ def _handle_lark_message_ws(event_data):
                 headers={"Authorization": f"Bearer {token}"},
                 timeout=60
             )
-            print(f"[LARK WS] File download: {resp.status_code}, size={len(resp.content)}")
+            print(f"[LARK] File download status: {resp.status_code}")
         except Exception as e:
-            print(f"[LARK WS] File download error: {e}")
-            reply(f"❌ 下载文件失败: {e}")
-            return
-
+            print(f"[LARK] File download error: {e}")
+            send_lark_text(open_id, "open_id", "❌ 下載文件失敗，請稍後再試。")
+            return JSONResponse({"code": 1, "msg": str(e)})
+        
         if resp.status_code != 200:
-            reply(f"❌ 文件获取失败 ({resp.status_code})。请确认应用有 im:resource 权限。")
-            return
-
+            send_lark_text(open_id, "open_id", "❌ 文件獲取失敗。")
+            return JSONResponse({"code": 1, "msg": f"HTTP {resp.status_code}"})
+        
         # Save as PDF
         with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
             f.write(resp.content)
             pdf_path = f.name
-
-        print(f"[LARK WS] PDF saved: {pdf_path}")
-        reply(f"📥 已收到文件「{file_name or 'PDF'}」，正在解析...")
-
+        
+        print(f"[LARK] PDF saved: {pdf_path}, size={len(resp.content)}")
+        
         # Process PDF
         try:
             results = process_pdf(pdf_path)
-            print(f"[LARK WS] Parsed {len(results)} records from PDF")
-
+            print(f"[LARK] Parsed {len(results)} records from PDF")
+            
             if not any(r.get("name") or r.get("license_plate") or r.get("policy_number") for r in results):
-                reply(
-                    "📋 已收到 PDF，但无法自动识别内容。\n\n"
-                    "请在 CRM 系统中手动新增记录。\n"
-                    f"🔗 {CRM_URL}/renewals"
-                )
-                _os.unlink(pdf_path)
-                return
+                # Try to extract image from PDF and send to user for verification
+                try:
+                    import pymupdf
+                    doc = pymupdf.open(pdf_path)
+                    if len(doc) > 0:
+                        page = doc[0]
+                        images = page.get_images()
+                        if images:
+                            xref = images[0][0]
+                            pix = pymupdf.Pixmap(doc, xref)
+                            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                                pix.save(tmp.name)
+                                tmp_path = tmp.name
 
-            saved_count = 0
+                            # Upload image to Lark
+                            with open(tmp_path, "rb") as f:
+                                upload_resp = httpx.post(
+                                    f"{LARK_API_BASE}/im/v1/images",
+                                    headers={"Authorization": f"Bearer {token}"},
+                                    files={"image": ("pdf_page.png", f, "image/png")},
+                                    data={"image_type": "message"},
+                                    timeout=30
+                                )
+                            upload_data = upload_resp.json()
+                            if upload_data.get("code") == 0:
+                                image_key = upload_data["data"]["image_key"]
+                                # Send image message
+                                lark_post("/im/v1/messages", {
+                                    "receive_id": open_id,
+                                    "msg_type": "image",
+                                    "content": json.dumps({"image_key": image_key})
+                                })
+
+                            os.unlink(tmp_path)
+                except Exception as e:
+                    print(f"[LARK] Failed to send PDF image: {e}")
+
+                send_lark_text(open_id, "open_id",
+                    "📋 已收到 PDF，但 OCR 無法自動識別內容。\n\n"
+                    "已將 PDF 圖片發送給你，請查看並手動在 CRM 系統中新增記錄。"
+                )
+                return JSONResponse({"code": 0, "msg": "No identifiable data"})
+            
+            saved_records = []
             for info in results:
                 result = save_to_crm(info)
                 if result.get("ok"):
-                    saved_count += 1
-                    print(f"[LARK WS] Saved: {result}")
-
-            if saved_count > 0:
-                reply(
-                    f"✅ 成功解析並存入 CRM（共 {saved_count} 筆記錄）！\n"
-                    f"📊 查看續保列表：{CRM_URL}/renewals"
-                )
-            else:
-                reply("⚠️ 未能自動識別有效資料，請手動新增。")
-
+                    saved_records.append(
+                        f"✅ {result['customer']} | {result.get('license_plate','N/A')} | "
+                        f"{result.get('policy_type','N/A')} | HKD {result.get('premium',0):,.0f}"
+                    )
+                else:
+                    saved_records.append(f"❌ {info.get('name','未知')}: {result.get('error','失敗')}")
+            
+            reply = "📋 **PDF 自動入庫結果**\n\n" + "\n".join(saved_records)
+            reply += "\n\n請在 CRM 系統中確認資料是否正確。"
+            
+            send_lark_text(open_id, "open_id", reply)
+            
         except Exception as e:
-            print(f"[LARK WS] Process error: {e}")
-            traceback.print_exc()
-            reply(f"❌ 解析失敗: {e}")
+            print(f"[LARK] PDF processing error: {e}")
+            send_lark_text(open_id, "open_id", f"❌ 處理 PDF 時發生錯誤: {e}")
         finally:
-            try:
-                _os.unlink(pdf_path)
-            except:
-                pass
-        return
-
+            os.unlink(pdf_path)
+    
     # ── Text message ──
-    if msg_type == "text":
-        text_content = content.get("text", "").strip()
-        print(f"[LARK WS] Text: {text_content}")
-
-        if not text_content:
-            return
-
-        # Quick commands
-        if text_content in ["/help", "幫助", "help"]:
-            reply(
-                "📋 PDF BOT 使用說明：\n\n"
-                "• 發送 PDF 文件給我 → 自動解析並入庫\n"
-                "• 發送任何續保通知書 PDF 即可\n"
-                "• 等待解析完成後回覆結果\n\n"
-                f"🌐 CRM 系統：{CRM_URL}"
+    elif msg_type == "text":
+        text = content.get("text", "").strip().lower()
+        
+        if text in ["help", "幫助", "/help", "?"]:
+            help_text = (
+                "📋 **PDF保單Bot 使用說明**\n\n"
+                "直接發送 PDF 文件給我，我會自動：\n"
+                "1️⃣ 解析 PDF 內容\n"
+                "2️⃣ 識別客戶姓名、車牌、保費等\n"
+                "3️⃣ 自動存入 CRM 系統\n\n"
+                "支援：續保通知書、保單文件、港車北上文件"
             )
-            return
+            send_lark_text(open_id, "open_id", help_text)
+        else:
+            send_lark_text(open_id, "open_id", 
+                "😊 請直接發送 PDF 文件給我處理\n"
+                "輸入「幫助」查看使用說明"
+            )
+    
+    return JSONResponse({"code": 0, "msg": "ok"})
 
-        reply(
-            f"收到你的消息：「{text_content[:50]}」\n\n"
-            f"📎 請發送續保通知書 PDF 文件給我，我會自動幫你入庫！\n"
-            f"🌐 或直接登入：{CRM_URL}/renewals"
-        )
-        return
+# ── Health Check ──────────────────────────────────────────────────────────────
+@app.get("/health")
+def health():
+    return {"status": "ok", "service": "feishu-pdf-bot", "port": 5001}
 
-    # Other message types
-    reply(f"收到「{msg_type}」類型的消息，請發送 PDF 文件。")
+@app.get("/")
+def root():
+    return {"service": "Feishu PDF Bot", "version": "1.0", "lark_app_id": LARK_APP_ID}
 
-
-def start_lark_ws_background():
-    """Start the Lark WebSocket client in a background thread."""
-    global _ws_loop, _ws_thread
-    if _ws_thread and _ws_thread.is_alive():
-        print("[LARK WS] Already running")
-        return
-
-    def run_loop():
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        _ws_loop = loop
-        print("[LARK WS] Starting WebSocket client...")
-        loop.run_until_complete(_lark_ws_reader())
-
-    _ws_thread = threading.Thread(target=run_loop, daemon=True, name="LarkWS")
-    _ws_thread.start()
-    print("[LARK WS] Background thread started")
+# ── Run ──────────────────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    import uvicorn
+    print("=" * 50)
+    print("Feishu PDF Bot starting on port 5001...")
+    print("Webhook URL: http://YOUR_PUBLIC_IP:5001/webhook/lark")
+    print("=" * 50)
+    uvicorn.run(app, host="0.0.0.0", port=5001, log_level="info")
