@@ -1,501 +1,736 @@
-1|"""
-2|Feishu PDF Bot - Webhook Server
-3|接收 Lark 發送的消息和文件，自動解析 PDF 並入庫至 CRM
-4|"""
-5|import os
-6|import sys
-7|import json
-8|import asyncio
-9|import tempfile
-10|import subprocess
-11|import re
-12|import shutil
-13|from pathlib import Path
-14|from datetime import datetime
-15|from fastapi import FastAPI, Request, Query
-16|from fastapi.responses import JSONResponse
-17|import httpx
-18|import urllib.request
-19|import urllib.parse
-20|
-21|# ── Config ────────────────────────────────────────────────────────────────────
-22|LARK_API_BASE = "https://open.larksuite.com/open-apis"
-23|LARK_APP_ID = os.getenv("LARK_APP_ID", "cli_aaa0809c34389e18")
-24|LARK_APP_SECRET = os.getenv("LARK_APP_SECRET", "r0az2k1jETYxHF2DxiR0MbcukUkKQZFU")
-25|CRM_URL = os.getenv("CRM_URL", "http://localhost:5000")
-26|# 固定回覆對話 ID（PDF Bot 所在的群組/對話）
-27|DEFAULT_CHAT_ID = os.getenv("DEFAULT_CHAT_ID", "oc_2903a12ccac2829f6e2af59fc5abeadb")
-28|
-29|# ── FastAPI App ────────────────────────────────────────────────────────────────
-30|app = FastAPI(title="Feishu PDF Bot Webhook")
-31|
-32|# ── Lark Token Cache ──────────────────────────────────────────────────────────
-33|_tenant_token = {"token": None, "expires_at": 0}
-34|
-35|def get_tenant_token():
-36|    now = datetime.now().timestamp()
-37|    if _tenant_token["token"] and _tenant_token["expires_at"] > now:
-38|        return _tenant_token["token"]
-39|    
-40|    resp = httpx.post(
-41|        f"{LARK_API_BASE}/auth/v3/tenant_access_token/internal",
-42|        json={"app_id": LARK_APP_ID, "app_secret": LARK_APP_SECRET},
-43|        timeout=30
-44|    )
-45|    data = resp.json()
-46|    if data.get("code") != 0:
-47|        raise Exception(f"Lark auth failed: {data}")
-48|    
-49|    _tenant_token["token"] = data["tenant_access_token"]
-50|    _tenant_token["expires_at"] = now + data.get("expire", 7200) - 120
-51|    print(f"[LARK] Token refreshed, expires in {data.get('expire', 7200)}s")
-52|    return _tenant_token["token"]
-53|
-54|# ── Lark API Helpers ───────────────────────────────────────────────────────────
-55|def lark_get(path, params=None):
-56|    token = get_tenant_token()
-57|    resp = httpx.get(
-58|        f"{LARK_API_BASE}{path}",
-59|        headers={"Authorization": f"Bearer {token}"},
-60|        params=params,
-61|        timeout=30
-62|    )
-63|    return resp.json()
-64|
-65|def lark_post(path, json_data=None):
-66|    token = get_tenant_token()
-67|    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-68|    resp = httpx.post(
-69|        f"{LARK_API_BASE}{path}",
-70|        headers=headers,
-71|        json=json_data,
-72|        timeout=60
-73|    )
-74|    return resp.json()
-75|
-76|# ── CRM API Helpers ────────────────────────────────────────────────────────────
-77|def crm_api_post(endpoint, fields):
-78|    data = urllib.parse.urlencode(fields).encode()
-79|    req = urllib.request.Request(
-80|        f"{CRM_URL}{endpoint}",
-81|        data=data,
-82|        method="POST"
-83|    )
-84|    req.add_header("Content-Type", "application/x-www-form-urlencoded")
-85|    try:
-86|        with urllib.request.urlopen(req, timeout=15) as resp:
-87|            return json.loads(resp.read().decode())
-88|    except Exception as e:
-89|        print(f"[CRM] POST {endpoint} failed: {e}")
-90|        return {"error": str(e)}
-91|
-92|def crm_api_get(endpoint):
-93|    req = urllib.request.Request(f"{CRM_URL}{endpoint}")
-94|    try:
-95|        with urllib.request.urlopen(req, timeout=10) as resp:
-96|            return json.loads(resp.read().decode())
-97|    except Exception as e:
-98|        print(f"[CRM] GET {endpoint} failed: {e}")
-99|        return []
-100|
-101|def crm_find_customer_by_name(name):
-102|    customers = crm_api_get("/api/customers?include_potential=true")
-103|    if isinstance(customers, list):
-104|        for c in customers:
-105|            if name in c.get("name", ""):
-106|                return c
-107|    return None
-108|
-109|def crm_create_customer(name, phone="", email=""):
-110|    return crm_api_post("/api/customers", {"name": name, "phone": phone, "email": email})
-111|
-112|def crm_create_renewal(
-113|    customer_id, license_plate, insurance_company,
-114|    policy_type, coverage_amount, premium,
-115|    effective_date, expiry_date, notes,
-116|    policy_number, vehicle_model, phone=""
-117|):
-118|    return crm_api_post("/api/renewals", {
-119|        "customer_id": customer_id,
-120|        "license_plate": license_plate,
-121|        "insurance_company": insurance_company,
-122|        "policy_type": policy_type,
-123|        "coverage_amount": coverage_amount,
-124|        "premium": premium,
-125|        "effective_date": effective_date,
-126|        "expiry_date": expiry_date,
-127|        "notes": notes,
-128|        "policy_number": policy_number,
-129|        "vehicle_model": vehicle_model,
-130|        "phone": phone,
-131|        "status": "pending"
-132|    })
-133|
-134|# ── PDF Processing ────────────────────────────────────────────────────────────
-135|def extract_pdf_text(pdf_path):
-136|    """Extract text from PDF using pdftotext"""
-137|    try:
-138|        result = subprocess.run(
-139|            ["pdftotext", "-layout", str(pdf_path), "-"],
-140|            capture_output=True, text=True, timeout=30
-141|        )
-142|        if result.returncode == 0:
-143|            return result.stdout
-144|    except Exception as e:
-145|        print(f"[PDF] pdftotext failed: {e}")
-146|    return ""
-147|
-148|def get_pdf_page_count(pdf_path):
-149|    """Get number of pages in PDF"""
-150|    try:
-151|        result = subprocess.run(
-152|            ["pdfinfo", str(pdf_path)],
-153|            capture_output=True, text=True, timeout=10
-154|        )
-155|        for line in result.stdout.split("\n"):
-156|            if "Pages:" in line:
-157|                return int(line.split(":")[-1].strip())
-158|    except:
-159|        pass
-160|    return 1
-161|
-162|def parse_date(date_str):
-163|    """Convert date string to YYYY-MM-DD"""
-164|    if not date_str:
-165|        return ""
-166|    date_str = date_str.strip()
-167|    formats = [
-168|        "%d/%m/%Y", "%d-%m-%Y", "%d.%m.%Y",
-169|        "%Y/%m/%d", "%Y-%m-%d",
-170|        "%d %B %Y", "%B %d, %Y",
-171|    ]
-172|    for fmt in formats:
-173|        try:
-174|            dt = datetime.strptime(date_str, fmt)
-175|            return dt.strftime("%Y-%m-%d")
-176|        except:
-177|            pass
-178|    return date_str
-179|
-180|def parse_renewal_text(text, page_num=1):
-181|    """Parse renewal notice text to extract policy info"""
-182|    info = {
-183|        "name": "", "phone": "", "license_plate": "",
-184|        "policy_type": "", "premium": 0, "coverage_amount": 0,
-185|        "effective_date": "", "expiry_date": "",
-186|        "policy_number": "", "vehicle_model": "",
-187|        "insurance_company": "永誠保險",
-188|        "notes": ""
-189|    }
-190|    
-191|    if not text.strip():
-192|        return info
-193|    
-194|    # Extract name
-195|    name_patterns = [
-196|        r"客戶姓名[：:]\s*([^\n]{2,20})",
-197|        r"投保人[：:]\s*([^\n]{2,20})",
-198|        r"Policy\s*Holder[：:]\s*([^\n]{2,20})",
-199|        r"Name[：:]\s*([^\n]{2,20})",
-200|    ]
-201|    for pat in name_patterns:
-202|        m = re.search(pat, text)
-203|        if m:
-204|            info["name"] = m.group(1).strip()
-205|            break
-206|    
-207|    # Extract phone
-208|    phone_patterns = [
-209|        r"電話[：:]\s*([0-9\s\-]{8,15})",
-210|        r"Tel[：:]\s*([0-9\s\-]{8,15})",
-211|        r"Phone[：:]\s*([0-9\s\-]{8,15})",
-212|        r"(?:9|8|5|6)\d[\s\-]?\d{4}[\s\-]?\d{4}",
-213|    ]
-214|    for pat in phone_patterns:
-215|        m = re.search(pat, text, re.IGNORECASE)
-216|        if m:
-217|            info["phone"] = m.group(1).strip()
-218|            break
-219|    
-220|    # Extract license plate
-221|    plate_patterns = [
-222|        r"[粵粤]?\s*[A-Z]{1,3}[\s\-]?[0-9]{1,4}[\s\-]?[A-Z0-9]*",
-223|        r"車牌[：:]*\s*([A-Z0-9]{2,10})",
-224|        r"Registration[：:]*\s*([A-Z0-9]{2,10})",
-225|        r"\b([A-Z]{2}\s*[0-9]{4})\b",
-226|    ]
-227|    for pat in plate_patterns:
-228|        m = re.search(pat, text, re.IGNORECASE)
-229|        if m:
-230|            plate = re.sub(r"\s+", "", m.group(0).upper())
-231|            if len(plate) >= 4:
-232|                info["license_plate"] = plate
-233|                break
-234|    
-235|    # Extract policy number
-236|    policy_patterns = [
-237|        r"保單號碼[：:]\s*([A-Z0-9\-]{4,25})",
-238|        r"Policy\s*No[.:\s]*([A-Z0-9\-]{4,25})",
-239|        r"POLICY\s*NO[.:\s]*([A-Z0-9\-]{4,25})",
-240|        r"\b(POL[A-Z0-9\-]{4,})\b",
-241|        r"\b(RN[-_][A-Z0-9\-]{4,})\b",
-242|    ]
-243|    for pat in policy_patterns:
-244|        m = re.search(pat, text, re.IGNORECASE)
-245|        if m:
-246|            info["policy_number"] = m.group(1).strip().upper()
-247|            break
-248|    
-249|    # Extract premium
-250|    premium_patterns = [
-251|        r"(?:保費|Premium)[^\$]*HK\$\s*([0-9,]+\.?\d*)",
-252|        r"(?:Total|總計)[^\$]*HK\$\s*([0-9,]+\.?\d*)",
-253|    ]
-254|    for pat in premium_patterns:
-255|        m = re.search(pat, text, re.IGNORECASE)
-256|        if m:
-257|            try:
-258|                info["premium"] = float(m.group(1).replace(",", ""))
-259|                break
-260|            except:
-261|                pass
-262|    
-263|    # Extract sum insured
-264|    si_patterns = [
-265|        r"Sum\s*Insured[：:]*\s*HK\$\s*([0-9,]+\.?\d*)",
-266|        r"Insured\s*Amount[：:]*\s*HK\$\s*([0-9,]+\.?\d*)",
-267|        r"投保金額[：:]*\s*HK\$\s*([0-9,]+\.?\d*)",
-268|        r"保額[：:]*\s*HK\$\s*([0-9,]+\.?\d*)",
-269|    ]
-270|    for pat in si_patterns:
-271|        m = re.search(pat, text, re.IGNORECASE)
-272|        if m:
-273|            try:
-274|                info["coverage_amount"] = float(m.group(1).replace(",", ""))
-275|                break
-276|            except:
-277|                pass
-278|    
-279|    # Extract dates
-280|    date_patterns = [
-281|        (r"生效[日日期:：\s]*\s*(\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})", "effective_date"),
-282|        (r"Effect\s*From[：:]*\s*(\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})", "effective_date"),
-283|        (r"起保[日日期:：\s]*\s*(\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})", "effective_date"),
-284|        (r"到期[日日期:：\s]*\s*(\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})", "expiry_date"),
-285|        (r"Expiry\s*Date[：:]*\s*(\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})", "expiry_date"),
-286|        (r"屆滿[日日期:：\s]*\s*(\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})", "expiry_date"),
-287|    ]
-288|    for pat, field in date_patterns:
-289|        m = re.search(pat, text, re.IGNORECASE)
-290|        if m:
-291|            info[field] = parse_date(m.group(1))
-292|    
-293|    # Extract vehicle model
-294|    vehicle_patterns = [
-295|        r"車型[：:]\s*([^\n]{3,40})",
-296|        r"車款[：:]\s*([^\n]{3,40})",
-297|        r"Vehicle\s*Model[：:]\s*([^\n]{3,40})",
-298|        r"(Tesla\s+Model\s+\w+|BYD[\s\-]\w+|Mercedes[\s\-]?BENZ[^\n]{0,20}|BMW[^\n]{0,15}|Toyota[^\n]{0,15}|Honda[^\n]{0,15})",
-299|    ]
-300|    for pat in vehicle_patterns:
-301|        m = re.search(pat, text, re.IGNORECASE)
-302|        if m:
-303|            info["vehicle_model"] = m.group(1).strip()
-304|            break
-305|    
-306|    # Determine policy type
-307|    text_lower = text.lower()
-308|    if "comprehensive" in text_lower or "全保" in text:
-309|        info["policy_type"] = "全保"
-310|    elif "third party" in text_lower or "第三者" in text:
-311|        info["policy_type"] = "第三者責任"
-312|        if info["coverage_amount"] == 0:
-313|            info["coverage_amount"] = 2000000
-314|    elif "港車北上" in text:
-315|        info["policy_type"] = "港車北上"
-316|    elif "兩地牌" in text:
-317|        info["policy_type"] = "兩地牌"
-318|    else:
-319|        info["policy_type"] = "其他"
-320|    
-321|    # Extract NCB
-322|    ncb_list = []
-323|    for pat in [r"NCB\s*[：:]\s*(\d+)%", r"NCD\s*[：:]\s*(\d+)%", r"無索償折扣[：:]\s*(\d+)%"]:
-324|        m = re.search(pat, text, re.IGNORECASE)
-325|        if m:
-326|            ncb_list.append(f"NCB: {m.group(1)}%")
-327|    
-328|    # Extract excesses
-329|    excess_map = [
-330|        ("TPPD", r"TPPD[：:]*\s*HK\$\s*([0-9,]+\.?\d*)"),
-331|        ("OD", r"(?:OD|Self)[：:]*\s*HK\$\s*([0-9,]+\.?\d*)"),
-332|        ("THEFT", r"THEFT[：:]*\s*HK\$\s*([0-9,]+\.?\d*)"),
-333|        ("YIU", r"YIU[：:]*\s*HK\$\s*([0-9,]+\.?\d*)"),
-334|        ("PARKING", r"PARKING[：:]*\s*HK\$\s*([0-9,]+\.?\d*)"),
-335|    ]
-336|    excess_list = []
-337|    for key, pat in excess_map:
-338|        m = re.search(pat, text, re.IGNORECASE)
-339|        if m:
-340|            try:
-341|                val = float(m.group(1).replace(",", ""))
-342|                excess_list.append(f"{key}: HK${val:,.0f}")
-343|            except:
-344|                pass
-345|    
-346|    # Build notes
-347|    notes_parts = []
-348|    if ncb_list:
-349|        notes_parts.append(" | ".join(ncb_list))
-350|    if excess_list:
-351|        notes_parts.append(" | ".join(excess_list))
-352|    if info["policy_number"]:
-353|        notes_parts.append(f"Policy: {info['policy_number']}")
-354|    if info["vehicle_model"]:
-355|        notes_parts.append(f"Model: {info['vehicle_model']}")
-356|    info["notes"] = " | ".join(notes_parts)
-357|    
-358|    return info
-359|
-360|def process_pdf(pdf_path):
-361|    """Process PDF and return list of parsed records"""
-362|    text = extract_pdf_text(pdf_path)
-363|    page_count = get_pdf_page_count(pdf_path)
-364|    
-365|    results = []
-366|    
-367|    if text.strip():
-368|        # Split by form feed or page markers
-369|        pages = re.split(r"\f|(?=\w+\s+\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})", text)
-370|        for i, page_text in enumerate(pages[:page_count]):
-371|            if page_text.strip():
-372|                info = parse_renewal_text(page_text, i+1)
-373|                if info["name"] or info["license_plate"] or info["policy_number"]:
-374|                    results.append(info)
-375|    
-376|    # If nothing found, create one empty record for manual entry
-377|    if not results:
-378|        results.append(parse_renewal_text("", 1))
-379|    
-380|    return results
-381|
-382|# ── Save to CRM ───────────────────────────────────────────────────────────────
-383|def save_to_crm(info):
-384|    """Save parsed info to CRM, return result dict"""
-385|    if not info.get("name") and not info.get("license_plate") and not info.get("policy_number"):
-386|        return {"error": "無法識別任何資料"}
-387|    
-388|    name = info.get("name") or "未知客戶"
-389|    customer = crm_find_customer_by_name(name)
-390|    
-391|    if not customer:
-392|        result = crm_create_customer(name)
-393|        if "error" in result:
-394|            return {"error": f"建立客戶失敗: {result['error']}"}
-395|        customer = crm_find_customer_by_name(name)
-396|        if not customer:
-397|            return {"error": "客戶建立後找不到"}
-398|    
-399|    cid = customer["id"]
-400|    
-401|    result = crm_create_renewal(
-402|        customer_id=cid,
-403|        license_plate=info.get("license_plate", ""),
-404|        insurance_company=info.get("insurance_company", "永誠保險"),
-405|        policy_type=info.get("policy_type", "其他"),
-406|        coverage_amount=info.get("coverage_amount", 0),
-407|        premium=info.get("premium", 0),
-408|        effective_date=info.get("effective_date", ""),
-409|        expiry_date=info.get("expiry_date", ""),
-410|        notes=info.get("notes", ""),
-411|        policy_number=info.get("policy_number", ""),
-412|        vehicle_model=info.get("vehicle_model", ""),
-413|        phone=info.get("phone", "")
-414|    )
-415|    
-416|    if "error" in result:
-417|        return {"error": f"建立續保記錄失敗: {result['error']}"}
-418|    
-419|    return {
-420|        "ok": True,
-421|        "customer": customer["name"],
-422|        "customer_id": cid,
-423|        "policy_type": info.get("policy_type"),
-424|        "license_plate": info.get("license_plate"),
-425|        "premium": info.get("premium"),
-426|    }
-427|
-428|# ── Lark Message Sending ─────────────────────────────────────────────────────
-429|def send_lark_text(receive_id, receive_id_type, text):
-430|    """Send text message to Lark user or chat"""
-431|    result = lark_post("/im/v1/messages", {
-432|        "receive_id": receive_id,
-433|        "msg_type": "text",
-434|        "content": json.dumps({"text": text})
-435|    })
-436|    return result
-437|
-438|# ── Webhook Endpoints ─────────────────────────────────────────────────────────
-439|@app.get("/webhook/lark")
-440|async def webhook_verify(request: Request, challenge: str = Query(None)):
-441|    """Lark Webhook URL 驗證"""
-442|    print(f"[LARK WEBHOOK] GET verification, challenge={challenge}")
-443|    return {"challenge": challenge}
-444|
-445|@app.post("/webhook/lark")
-446|async def webhook_lark(request: Request):
-447|    """Lark 消息 Webhook 端點"""
-448|    try:
-449|        body = await request.json()
-450|    except:
-451|        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
-452|    
-453|    event_type = body.get("event_type", "")
-454|    print(f"[LARK WEBHOOK] Event: {event_type}")
-455|    print(f"[LARK WEBHOOK] Body: {json.dumps(body, ensure_ascii=False)[:300]}")
-456|    
-457|    if event_type == "im.message.receive_v1":
-458|        return await handle_message(body.get("event", {}))
-459|    
-460|    return JSONResponse({"code": 0, "msg": "ok"})
-461|
-462|async def handle_message(event):
-463|    """處理收到的 Lark 消息"""
-464|    message = event.get("message", {})
-465|    msg_type = message.get("msg_type", "")
-466|    msg_id = message.get("message_id", "")
-467|    chat_id = event.get("chat_id", "")
-468|    
-469|    # Get sender info
-470|    sender = event.get("sender", {})
-471|    sender_id = sender.get("sender_id", {})
-472|    open_id = sender_id.get("open_id", "")
-473|    
-474|    try:
-475|        content = json.loads(message.get("content", "{}"))
-476|    except:
-477|        content = {}
-478|    
-479|    print(f"[LARK] msg_type={msg_type}, msg_id={msg_id}, chat_id={chat_id}")
-480|    
-481|    # ── File message (PDF) ──
-482|    if msg_type == "file":
-483|        file_key = content.get("file_key", "")
-484|        
-485|        if not file_key:
-486|            return JSONResponse({"code": 0, "msg": "no file_key"})
-487|        
-488|        # Download file from Lark
-489|        try:
-490|            token = get_tenant_token()
-491|            resp = httpx.get(
-492|                f"{LARK_API_BASE}/im/v1/messages/{msg_id}/resources/{file_key}",
-493|                headers={"Authorization": f"Bearer {token}"},
-494|                timeout=60
-495|            )
-496|            print(f"[LARK] File download status: {resp.status_code}")
-497|        except Exception as e:
-498|            print(f"[LARK] File download error: {e}")
-499|            send_lark_text(DEFAULT_CHAT_ID, "chat_id", "❌ 下載文件失敗，請稍後再試。")
-500|            return JSONResponse({"code": 1, "msg": str(e)})
-501|
+"""
+Feishu PDF Bot - Webhook Server
+接收 Lark 發送的消息和文件，自動解析 PDF 並入庫至 CRM
+"""
+import os
+import sys
+import json
+import asyncio
+import tempfile
+import subprocess
+import re
+import shutil
+from pathlib import Path
+from datetime import datetime
+from fastapi import FastAPI, Request, Query
+from fastapi.responses import JSONResponse
+import httpx
+import urllib.request
+import urllib.parse
+
+# ── Config ────────────────────────────────────────────────────────────────────
+LARK_API_BASE = "https://open.larksuite.com/open-apis"
+LARK_APP_ID = os.getenv("LARK_APP_ID", "cli_aaa0809c34389e18")
+LARK_APP_SECRET = "r0az2k1jETYxHF2DxiR0MbcukUkKQZFU"
+CRM_URL = os.getenv("CRM_URL", "http://localhost:5000")
+# Fixed reply chat ID (PDF Bot's group/conversation)
+DEFAULT_CHAT_ID = os.getenv("DEFAULT_CHAT_ID", "oc_2903a12ccac2829f6e2af59fc5abeadb")
+# Lark Webhook Verification Token
+LARK_VERIFICATION_TOKEN=os.getenv("LARK_VERIFICATION_TOKEN", "")
+# ── FastAPI App ────────────────────────────────────────────────────────────────
+app = FastAPI(title="Feishu PDF Bot Webhook")
+
+# ── Lark Token Cache ──────────────────────────────────────────────────────────
+_tenant_token = {"token": None, "expires_at": 0}
+
+def get_tenant_token():
+    now = datetime.now().timestamp()
+    if _tenant_token["token"] and _tenant_token["expires_at"] > now:
+        return _tenant_token["token"]
+    
+    resp = httpx.post(
+        f"{LARK_API_BASE}/auth/v3/tenant_access_token/internal",
+        json={"app_id": LARK_APP_ID, "app_secret": LARK_APP_SECRET},
+        timeout=30
+    )
+    data = resp.json()
+    if data.get("code") != 0:
+        raise Exception(f"Lark auth failed: {data}")
+    
+    _tenant_token["token"] = data["tenant_access_token"]
+    _tenant_token["expires_at"] = now + data.get("expire", 7200) - 120
+    print(f"[LARK] Token refreshed, expires in {data.get('expire', 7200)}s")
+    return _tenant_token["token"]
+
+# ── Lark API Helpers ───────────────────────────────────────────────────────────
+def lark_get(path, params=None):
+    token = get_tenant_token()
+    resp = httpx.get(
+        f"{LARK_API_BASE}{path}",
+        headers={"Authorization": f"Bearer {token}"},
+        params=params,
+        timeout=30
+    )
+    return resp.json()
+
+def lark_post(path, json_data=None):
+    token = get_tenant_token()
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    resp = httpx.post(
+        f"{LARK_API_BASE}{path}",
+        headers=headers,
+        json=json_data,
+        timeout=60
+    )
+    return resp.json()
+
+# ── CRM API Helpers ────────────────────────────────────────────────────────────
+def crm_api_post(endpoint, fields):
+    data = urllib.parse.urlencode(fields).encode()
+    req = urllib.request.Request(
+        f"{CRM_URL}{endpoint}",
+        data=data,
+        method="POST"
+    )
+    req.add_header("Content-Type", "application/x-www-form-urlencoded")
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return json.loads(resp.read().decode())
+    except Exception as e:
+        print(f"[CRM] POST {endpoint} failed: {e}")
+        return {"error": str(e)}
+
+def crm_api_get(endpoint):
+    req = urllib.request.Request(f"{CRM_URL}{endpoint}")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read().decode())
+    except Exception as e:
+        print(f"[CRM] GET {endpoint} failed: {e}")
+        return []
+
+def crm_find_customer_by_name(name):
+    customers = crm_api_get("/api/customers?include_potential=true")
+    if isinstance(customers, list):
+        for c in customers:
+            if name in c.get("name", ""):
+                return c
+    return None
+
+def crm_create_customer(name, phone="", email=""):
+    return crm_api_post("/api/customers", {"name": name, "phone": phone, "email": email})
+
+def crm_create_renewal(
+    customer_id, license_plate, insurance_company,
+    policy_type, coverage_amount, premium,
+    effective_date, expiry_date, notes,
+    policy_number, vehicle_model, phone=""
+):
+    return crm_api_post("/api/renewals", {
+        "customer_id": customer_id,
+        "license_plate": license_plate,
+        "insurance_company": insurance_company,
+        "policy_type": policy_type,
+        "coverage_amount": coverage_amount,
+        "premium": premium,
+        "effective_date": effective_date,
+        "expiry_date": expiry_date,
+        "notes": notes,
+        "policy_number": policy_number,
+        "vehicle_model": vehicle_model,
+        "phone": phone,
+        "status": "pending"
+    })
+
+# ── PDF Processing ────────────────────────────────────────────────────────────
+def lark_ocr_image(image_path):
+    """Use Lark AI to analyze image and extract text"""
+    try:
+        import base64
+        token = get_tenant_token()
+        with open(image_path, "rb") as f:
+            image_data = base64.b64encode(f.read()).decode()
+
+        # Use Lark's image recognition API
+        resp = httpx.post(
+            f"{LARK_API_BASE}/image/v1/recognize",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={
+                "image": image_data,
+                "type": "text"
+            },
+            timeout=120
+        )
+        data = resp.json()
+        print(f"[LARK OCR] Response: {data}")
+        if data.get("code") == 0:
+            results = data.get("data", {}).get("results", [])
+            texts = [r.get("text", "") for r in results if r.get("text")]
+            return "\n".join(texts)
+        else:
+            print(f"[LARK OCR] API error: {data}")
+            # Try alternative endpoint
+            resp2 = httpx.post(
+                f"{LARK_API_BASE}/optical_char_recognition/v1/image/basic_recognize",
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                json={"image": image_data},
+                timeout=60
+            )
+            data2 = resp2.json()
+            print(f"[LARK OCR] Fallback response: {data2}")
+            if data2.get("code") == 0:
+                return data2.get("data", {}).get("text", "")
+    except Exception as e:
+        print(f"[LARK OCR] Failed: {e}")
+    return ""
+
+def extract_pdf_text(pdf_path):
+    """Extract text from PDF — try pdftotext, PyPDF2, then OCR for scanned PDFs"""
+    # Try pdftotext (available on Render with poppler)
+    try:
+        result = subprocess.run(
+            ["pdftotext", "-layout", str(pdf_path), "-"],
+            capture_output=True, text=True, timeout=30
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout
+    except Exception:
+        pass
+
+    # Fallback: PyPDF2
+    try:
+        from PyPDF2 import PdfReader
+        reader = PdfReader(str(pdf_path))
+        texts = []
+        for page in reader.pages:
+            t = page.extract_text()
+            if t:
+                texts.append(t)
+        text = "\n".join(texts)
+        if text.strip():
+            return text
+    except Exception as e:
+        print(f"[PDF] PyPDF2 extract failed: {e}")
+
+    # OCR fallback for scanned/image-based PDFs
+    print("[PDF] No text found, trying OCR for scanned PDF...")
+    try:
+        import pymupdf
+        doc = pymupdf.open(str(pdf_path))
+        ocr_texts = []
+        for page_num, page in enumerate(doc):
+            images = page.get_images()
+            if images:
+                # Extract the first image from each page
+                for img in images:
+                    xref = img[0]
+                    pix = pymupdf.Pixmap(doc, xref)
+                    # Save to temp file for OCR
+                    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                        pix.save(tmp.name)
+                        tmp_path = tmp.name
+
+                    # Try pytesseract OCR
+                    ocr_success = False
+                    try:
+                        import pytesseract
+                        from PIL import Image
+                        img_pil = Image.open(tmp_path)
+                        text = pytesseract.image_to_string(img_pil, lang='chi_tra+eng')
+                        if text.strip():
+                            ocr_texts.append(text)
+                            ocr_success = True
+                            print(f"[PDF] pytesseract OCR page {page_num+1}: {len(text)} chars")
+                    except ImportError:
+                        print("[PDF] pytesseract not available...")
+                    except Exception as e:
+                        print(f"[PDF] pytesseract failed: {e}")
+
+                    # Cleanup temp file
+                    if os.path.exists(tmp_path):
+                        os.unlink(tmp_path)
+
+        if ocr_texts:
+            return "\n\n".join(ocr_texts)
+    except Exception as e:
+        print(f"[PDF] OCR extraction failed: {e}")
+
+    return ""
+
+def get_pdf_page_count(pdf_path):
+    """Get number of pages in PDF"""
+    # Try pdfinfo first
+    try:
+        result = subprocess.run(
+            ["pdfinfo", str(pdf_path)],
+            capture_output=True, text=True, timeout=10
+        )
+        for line in result.stdout.split("\n"):
+            if "Pages:" in line:
+                return int(line.split(":")[-1].strip())
+    except:
+        pass
+    # Fallback: PyPDF2
+    try:
+        from PyPDF2 import PdfReader
+        return len(PdfReader(str(pdf_path)).pages)
+    except:
+        pass
+    return 1
+
+def parse_date(date_str):
+    """Convert date string to YYYY-MM-DD"""
+    if not date_str:
+        return ""
+    date_str = date_str.strip()
+    formats = [
+        "%d/%m/%Y", "%d-%m-%Y", "%d.%m.%Y",
+        "%Y/%m/%d", "%Y-%m-%d",
+        "%d %B %Y", "%B %d, %Y",
+    ]
+    for fmt in formats:
+        try:
+            dt = datetime.strptime(date_str, fmt)
+            return dt.strftime("%Y-%m-%d")
+        except:
+            pass
+    return date_str
+
+def parse_renewal_text(text, page_num=1):
+    """Parse renewal notice text to extract policy info"""
+    info = {
+        "name": "", "phone": "", "license_plate": "",
+        "policy_type": "", "premium": 0, "coverage_amount": 0,
+        "effective_date": "", "expiry_date": "",
+        "policy_number": "", "vehicle_model": "",
+        "insurance_company": "永誠保險",
+        "notes": ""
+    }
+    
+    if not text.strip():
+        return info
+    
+    # Extract name
+    name_patterns = [
+        r"客戶姓名[：:]\s*([^\n]{2,20})",
+        r"投保人[：:]\s*([^\n]{2,20})",
+        r"Policy\s*Holder[：:]\s*([^\n]{2,20})",
+        r"Name[：:]\s*([^\n]{2,20})",
+    ]
+    for pat in name_patterns:
+        m = re.search(pat, text)
+        if m:
+            info["name"] = m.group(1).strip()
+            break
+    
+    # Extract phone
+    phone_patterns = [
+        r"電話[：:]\s*([0-9\s\-]{8,15})",
+        r"Tel[：:]\s*([0-9\s\-]{8,15})",
+        r"Phone[：:]\s*([0-9\s\-]{8,15})",
+        r"(?:9|8|5|6)\d[\s\-]?\d{4}[\s\-]?\d{4}",
+    ]
+    for pat in phone_patterns:
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            info["phone"] = m.group(1).strip()
+            break
+    
+    # Extract license plate
+    plate_patterns = [
+        r"[粵粤]?\s*[A-Z]{1,3}[\s\-]?[0-9]{1,4}[\s\-]?[A-Z0-9]*",
+        r"車牌[：:]*\s*([A-Z0-9]{2,10})",
+        r"Registration[：:]*\s*([A-Z0-9]{2,10})",
+        r"\b([A-Z]{2}\s*[0-9]{4})\b",
+    ]
+    for pat in plate_patterns:
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            plate = re.sub(r"\s+", "", m.group(0).upper())
+            if len(plate) >= 4:
+                info["license_plate"] = plate
+                break
+    
+    # Extract policy number
+    policy_patterns = [
+        r"保單號碼[：:]\s*([A-Z0-9\-]{4,25})",
+        r"Policy\s*No[.:\s]*([A-Z0-9\-]{4,25})",
+        r"POLICY\s*NO[.:\s]*([A-Z0-9\-]{4,25})",
+        r"\b(POL[A-Z0-9\-]{4,})\b",
+        r"\b(RN[-_][A-Z0-9\-]{4,})\b",
+    ]
+    for pat in policy_patterns:
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            info["policy_number"] = m.group(1).strip().upper()
+            break
+    
+    # Extract premium
+    premium_patterns = [
+        r"(?:保費|Premium)[^\$]*HK\$\s*([0-9,]+\.?\d*)",
+        r"(?:Total|總計)[^\$]*HK\$\s*([0-9,]+\.?\d*)",
+    ]
+    for pat in premium_patterns:
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            try:
+                info["premium"] = float(m.group(1).replace(",", ""))
+                break
+            except:
+                pass
+    
+    # Extract sum insured
+    si_patterns = [
+        r"Sum\s*Insured[：:]*\s*HK\$\s*([0-9,]+\.?\d*)",
+        r"Insured\s*Amount[：:]*\s*HK\$\s*([0-9,]+\.?\d*)",
+        r"投保金額[：:]*\s*HK\$\s*([0-9,]+\.?\d*)",
+        r"保額[：:]*\s*HK\$\s*([0-9,]+\.?\d*)",
+    ]
+    for pat in si_patterns:
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            try:
+                info["coverage_amount"] = float(m.group(1).replace(",", ""))
+                break
+            except:
+                pass
+    
+    # Extract dates
+    date_patterns = [
+        (r"生效[日日期:：\s]*\s*(\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})", "effective_date"),
+        (r"Effect\s*From[：:]*\s*(\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})", "effective_date"),
+        (r"起保[日日期:：\s]*\s*(\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})", "effective_date"),
+        (r"到期[日日期:：\s]*\s*(\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})", "expiry_date"),
+        (r"Expiry\s*Date[：:]*\s*(\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})", "expiry_date"),
+        (r"屆滿[日日期:：\s]*\s*(\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})", "expiry_date"),
+    ]
+    for pat, field in date_patterns:
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            info[field] = parse_date(m.group(1))
+    
+    # Extract vehicle model
+    vehicle_patterns = [
+        r"車型[：:]\s*([^\n]{3,40})",
+        r"車款[：:]\s*([^\n]{3,40})",
+        r"Vehicle\s*Model[：:]\s*([^\n]{3,40})",
+        r"(Tesla\s+Model\s+\w+|BYD[\s\-]\w+|Mercedes[\s\-]?BENZ[^\n]{0,20}|BMW[^\n]{0,15}|Toyota[^\n]{0,15}|Honda[^\n]{0,15})",
+    ]
+    for pat in vehicle_patterns:
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            info["vehicle_model"] = m.group(1).strip()
+            break
+    
+    # Determine policy type
+    text_lower = text.lower()
+    if "comprehensive" in text_lower or "全保" in text:
+        info["policy_type"] = "全保"
+    elif "third party" in text_lower or "第三者" in text:
+        info["policy_type"] = "第三者責任"
+        if info["coverage_amount"] == 0:
+            info["coverage_amount"] = 2000000
+    elif "港車北上" in text:
+        info["policy_type"] = "港車北上"
+    elif "兩地牌" in text:
+        info["policy_type"] = "兩地牌"
+    else:
+        info["policy_type"] = "其他"
+    
+    # Extract NCB
+    ncb_list = []
+    for pat in [r"NCB\s*[：:]\s*(\d+)%", r"NCD\s*[：:]\s*(\d+)%", r"無索償折扣[：:]\s*(\d+)%"]:
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            ncb_list.append(f"NCB: {m.group(1)}%")
+    
+    # Extract excesses
+    excess_map = [
+        ("TPPD", r"TPPD[：:]*\s*HK\$\s*([0-9,]+\.?\d*)"),
+        ("OD", r"(?:OD|Self)[：:]*\s*HK\$\s*([0-9,]+\.?\d*)"),
+        ("THEFT", r"THEFT[：:]*\s*HK\$\s*([0-9,]+\.?\d*)"),
+        ("YIU", r"YIU[：:]*\s*HK\$\s*([0-9,]+\.?\d*)"),
+        ("PARKING", r"PARKING[：:]*\s*HK\$\s*([0-9,]+\.?\d*)"),
+    ]
+    excess_list = []
+    for key, pat in excess_map:
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            try:
+                val = float(m.group(1).replace(",", ""))
+                excess_list.append(f"{key}: HK${val:,.0f}")
+            except:
+                pass
+    
+    # Build notes
+    notes_parts = []
+    if ncb_list:
+        notes_parts.append(" | ".join(ncb_list))
+    if excess_list:
+        notes_parts.append(" | ".join(excess_list))
+    if info["policy_number"]:
+        notes_parts.append(f"Policy: {info['policy_number']}")
+    if info["vehicle_model"]:
+        notes_parts.append(f"Model: {info['vehicle_model']}")
+    info["notes"] = " | ".join(notes_parts)
+    
+    return info
+
+def process_pdf(pdf_path):
+    """Process PDF and return list of parsed records"""
+    text = extract_pdf_text(pdf_path)
+    page_count = get_pdf_page_count(pdf_path)
+    
+    results = []
+    
+    if text.strip():
+        # Split by form feed or page markers
+        pages = re.split(r"\f|(?=\w+\s+\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})", text)
+        for i, page_text in enumerate(pages[:page_count]):
+            if page_text.strip():
+                info = parse_renewal_text(page_text, i+1)
+                if info["name"] or info["license_plate"] or info["policy_number"]:
+                    results.append(info)
+    
+    # If nothing found, create one empty record for manual entry
+    if not results:
+        results.append(parse_renewal_text("", 1))
+    
+    return results
+
+# ── Save to CRM ───────────────────────────────────────────────────────────────
+def save_to_crm(info):
+    """Save parsed info to CRM, return result dict"""
+    if not info.get("name") and not info.get("license_plate") and not info.get("policy_number"):
+        return {"error": "無法識別任何資料"}
+    
+    name = info.get("name") or "未知客戶"
+    customer = crm_find_customer_by_name(name)
+    
+    if not customer:
+        result = crm_create_customer(name)
+        if "error" in result:
+            return {"error": f"建立客戶失敗: {result['error']}"}
+        customer = crm_find_customer_by_name(name)
+        if not customer:
+            return {"error": "客戶建立後找不到"}
+    
+    cid = customer["id"]
+    
+    result = crm_create_renewal(
+        customer_id=cid,
+        license_plate=info.get("license_plate", ""),
+        insurance_company=info.get("insurance_company", "永誠保險"),
+        policy_type=info.get("policy_type", "其他"),
+        coverage_amount=info.get("coverage_amount", 0),
+        premium=info.get("premium", 0),
+        effective_date=info.get("effective_date", ""),
+        expiry_date=info.get("expiry_date", ""),
+        notes=info.get("notes", ""),
+        policy_number=info.get("policy_number", ""),
+        vehicle_model=info.get("vehicle_model", ""),
+        phone=info.get("phone", "")
+    )
+    
+    if "error" in result:
+        return {"error": f"建立續保記錄失敗: {result['error']}"}
+    
+    return {
+        "ok": True,
+        "customer": customer["name"],
+        "customer_id": cid,
+        "policy_type": info.get("policy_type"),
+        "license_plate": info.get("license_plate"),
+        "premium": info.get("premium"),
+    }
+
+# ── Lark Message Sending ─────────────────────────────────────────────────────
+def send_lark_text(receive_id, receive_id_type, text):
+    """Send text message to Lark user or chat"""
+    result = lark_post("/im/v1/messages", {
+        "receive_id": receive_id,
+        "msg_type": "text",
+        "content": json.dumps({"text": text})
+    })
+    return result
+
+# ── Webhook Endpoints ─────────────────────────────────────────────────────────
+@app.get("/webhook/lark")
+async def webhook_verify(request: Request, challenge: str = Query(None)):
+    """Lark Webhook URL 驗證"""
+    print(f"[LARK WEBHOOK] GET verification, challenge={challenge}")
+    return {"challenge": challenge}
+
+@app.post("/webhook/lark")
+async def webhook_lark(request: Request):
+    """Lark 消息 Webhook 端點 - 處理事件和 challenge 驗證"""
+    try:
+        body = await request.json()
+    except:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+    
+    # Handle challenge verification request
+    if "challenge" in body:
+        print(f"[LARK WEBHOOK] Challenge verification: {body['challenge']}")
+        return {"challenge": body['challenge']}
+    
+    event_type = body.get("event_type", "")
+    print(f"[LARK WEBHOOK] Event: {event_type}")
+    print(f"[LARK WEBHOOK] Body: {json.dumps(body, ensure_ascii=False)[:300]}")
+    
+    if event_type == "im.message.receive_v1":
+        return await handle_message(body.get("event", {}))
+    
+    return JSONResponse({"code": 0, "msg": "ok"})
+
+async def handle_message(event):
+    """處理收到的 Lark 消息"""
+    message = event.get("message", {})
+    msg_type = message.get("msg_type", "")
+    msg_id = message.get("message_id", "")
+    chat_id = event.get("chat_id", "")
+    
+    # Get sender info
+    sender = event.get("sender", {})
+    sender_id = sender.get("sender_id", {})
+    open_id = sender_id.get("open_id", "")
+    
+    try:
+        content = json.loads(message.get("content", "{}"))
+    except:
+        content = {}
+    
+    print(f"[LARK] msg_type={msg_type}, msg_id={msg_id}, chat_id={chat_id}")
+    
+    # ── File message (PDF) ──
+    if msg_type == "file":
+        file_key = content.get("file_key", "")
+        
+        if not file_key:
+            return JSONResponse({"code": 0, "msg": "no file_key"})
+        
+        # Download file from Lark
+        try:
+            token = get_tenant_token()
+            resp = httpx.get(
+                f"{LARK_API_BASE}/im/v1/messages/{msg_id}/resources/{file_key}",
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=60
+            )
+            print(f"[LARK] File download status: {resp.status_code}")
+        except Exception as e:
+            print(f"[LARK] File download error: {e}")
+            send_lark_text(DEFAULT_CHAT_ID, "chat_id", "❌ 下載文件失敗，請稍後再試。")
+            return JSONResponse({"code": 1, "msg": str(e)})
+        
+        if resp.status_code != 200:
+            send_lark_text(DEFAULT_CHAT_ID, "chat_id", "❌ 文件獲取失敗。")
+            return JSONResponse({"code": 1, "msg": f"HTTP {resp.status_code}"})
+        
+        # Save as PDF
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
+            f.write(resp.content)
+            pdf_path = f.name
+        
+        print(f"[LARK] PDF saved: {pdf_path}, size={len(resp.content)}")
+        
+        # Process PDF
+        try:
+            results = process_pdf(pdf_path)
+            print(f"[LARK] Parsed {len(results)} records from PDF")
+            
+            if not any(r.get("name") or r.get("license_plate") or r.get("policy_number") for r in results):
+                # Try to extract image from PDF and send to user for verification
+                try:
+                    import pymupdf
+                    doc = pymupdf.open(pdf_path)
+                    if len(doc) > 0:
+                        page = doc[0]
+                        images = page.get_images()
+                        if images:
+                            xref = images[0][0]
+                            pix = pymupdf.Pixmap(doc, xref)
+                            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                                pix.save(tmp.name)
+                                tmp_path = tmp.name
+
+                            # Upload image to Lark
+                            with open(tmp_path, "rb") as f:
+                                upload_resp = httpx.post(
+                                    f"{LARK_API_BASE}/im/v1/images",
+                                    headers={"Authorization": f"Bearer {token}"},
+                                    files={"image": ("pdf_page.png", f, "image/png")},
+                                    data={"image_type": "message"},
+                                    timeout=30
+                                )
+                            upload_data = upload_resp.json()
+                            if upload_data.get("code") == 0:
+                                image_key = upload_data["data"]["image_key"]
+                                # Send image message
+                                lark_post("/im/v1/messages", {
+                                    "receive_id": open_id,
+                                    "msg_type": "image",
+                                    "content": json.dumps({"image_key": image_key})
+                                })
+
+                            os.unlink(tmp_path)
+                except Exception as e:
+                    print(f"[LARK] Failed to send PDF image: {e}")
+
+                send_lark_text(DEFAULT_CHAT_ID, "chat_id",
+                    "📋 已收到 PDF，但 OCR 無法自動識別內容。\n\n"
+                    "已將 PDF 圖片發送給你，請查看並手動在 CRM 系統中新增記錄。"
+                )
+                return JSONResponse({"code": 0, "msg": "No identifiable data"})
+            
+            saved_records = []
+            for info in results:
+                result = save_to_crm(info)
+                if result.get("ok"):
+                    saved_records.append(
+                        f"✅ {result['customer']} | {result.get('license_plate','N/A')} | "
+                        f"{result.get('policy_type','N/A')} | HKD {result.get('premium',0):,.0f}"
+                    )
+                else:
+                    saved_records.append(f"❌ {info.get('name','未知')}: {result.get('error','失敗')}")
+            
+            reply = "📋 **PDF 自動入庫結果**\n\n" + "\n".join(saved_records)
+            reply += "\n\n請在 CRM 系統中確認資料是否正確。"
+            
+            send_lark_text(DEFAULT_CHAT_ID, "chat_id", reply)
+            
+        except Exception as e:
+            print(f"[LARK] PDF processing error: {e}")
+            send_lark_text(DEFAULT_CHAT_ID, "chat_id", f"❌ 處理 PDF 時發生錯誤: {e}")
+        finally:
+            os.unlink(pdf_path)
+    
+    # ── Text message ──
+    elif msg_type == "text":
+        text = content.get("text", "").strip().lower()
+        
+        if text in ["help", "幫助", "/help", "?"]:
+            help_text = (
+                "📋 **PDF保單Bot 使用說明**\n\n"
+                "直接發送 PDF 文件給我，我會自動：\n"
+                "1️⃣ 解析 PDF 內容\n"
+                "2️⃣ 識別客戶姓名、車牌、保費等\n"
+                "3️⃣ 自動存入 CRM 系統\n\n"
+                "支援：續保通知書、保單文件、港車北上文件"
+            )
+            send_lark_text(DEFAULT_CHAT_ID, "chat_id", help_text)
+        else:
+            send_lark_text(DEFAULT_CHAT_ID, "chat_id", 
+                "😊 請直接發送 PDF 文件給我處理\n"
+                "輸入「幫助」查看使用說明"
+            )
+    
+    return JSONResponse({"code": 0, "msg": "ok"})
+
+# ── Health Check ──────────────────────────────────────────────────────────────
+@app.get("/health")
+def health():
+    return {"status": "ok", "service": "feishu-pdf-bot", "port": 5001}
+
+@app.get("/")
+def root():
+    return {"service": "Feishu PDF Bot", "version": "1.0", "lark_app_id": LARK_APP_ID}
+
+# ── Run ──────────────────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    import uvicorn
+    print("=" * 50)
+    print("Feishu PDF Bot starting on port 5001...")
+    print("Webhook URL: http://YOUR_PUBLIC_IP:5001/webhook/lark")
+    print("=" * 50)
+    uvicorn.run(app, host="0.0.0.0", port=5001, log_level="info")

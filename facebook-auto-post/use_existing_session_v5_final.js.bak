@@ -1,0 +1,305 @@
+/**
+ * Facebook 自動發文 v5 - 精簡版
+ * 流程：導航→打開「建立帖子」→附加圖片→貼文字→發佈→關閉
+ * 重要：使用已存在的登入頁面循環發文，不開新頁面（新頁面沒有 session cookies）
+ * 參數: node use_existing_session_v5_final.js [startIndex] [count]
+ */
+
+const { chromium } = require('playwright');
+const fs = require('fs');
+
+const CONFIG = {
+  groups: JSON.parse(fs.readFileSync('./target_groups_clean.json', 'utf8')).groups,
+  imagesDir: '/Users/claw/Desktop/Facebook資料夾/FB_jpeg',
+  postLogFile: './fb_post_log.json',
+};
+
+const startIndex = parseInt(process.argv[2]) || 0;
+const postCount = parseInt(process.argv[3]) || 5;
+
+function loadPostLog() {
+  try {
+    return JSON.parse(fs.readFileSync(CONFIG.postLogFile, 'utf8'));
+  } catch {
+    return { posts: [], statistics: { success: 0, pending_review: 0, requires_question: 0, failed: 0 } };
+  }
+}
+
+function savePostLog(log) {
+  fs.writeFileSync(CONFIG.postLogFile, JSON.stringify(log, null, 2));
+}
+
+function addPostRecord(post) {
+  const log = loadPostLog();
+  log.posts.push(post);
+  log.total_posts = log.posts.length;
+  log.statistics[post.status] = (log.statistics[post.status] || 0) + 1;
+  log.last_updated = new Date().toISOString();
+  savePostLog(log);
+}
+
+function hasAlreadyPosted(groupId) {
+  const log = loadPostLog();
+  const recentPosts = log.posts.filter(p => {
+    const postTime = new Date(p.timestamp).getTime();
+    const now = Date.now();
+    return p.group_id === groupId && (now - postTime) < 24 * 60 * 60 * 1000;
+  });
+  return recentPosts.length > 0;
+}
+
+function getRandomImage() {
+  const images = ['01.jpeg', '02.jpeg', '03.jpeg', '04.jpeg', '05.jpeg'];
+  return `${CONFIG.imagesDir}/${images[Math.floor(Math.random() * images.length)]}`;
+}
+
+function getAIText() {
+  const today = new Date();
+  const weekDays = ['日', '一', '二', '三', '四', '五', '六'];
+  const dateStr = `📅 ${today.getFullYear()}年${today.getMonth() + 1}月${today.getDate()}日 星期${weekDays[today.getDay()]}`;
+  const weather = [
+    '駕駛北上，記得檢查車況，確保行車安全。',
+    '路面濕滑，請注意車距，減速慢行。',
+    '氣溫上升，長途駕駛請注意防曬和定時休息。',
+    '晚間駕駛請開啟車燈，確保安全。',
+  ];
+  const greeting = ['祝你旅途平安！', '願您一路順風！', '出行順利！'];
+  return `${dateStr} ${weather[Math.floor(Math.random() * weather.length)]} ${greeting[Math.floor(Math.random() * greeting.length)]}`;
+}
+
+function getTemplate(num, aiText) {
+  const templates = {
+    1: `【${aiText}】\n🚗 節省汽車保費｜ 保險報價｜私家車・電動車・營業車・港車北上\n🔥 港車北上保險首選！¥1469 起！\n永誠保險 — 香港人正規註冊國內保險公司代理人\n✅ 交強險 + 商業第三者責任險 + 醫保外藥用險\n✅ 12次道路救援（拖車、送油、換胎）\n✅ 廣東話/國語雙語服務\n✅ 免費代辦ETC\n全港最平，歡迎 WhatsApp / Wechat 查詢👉🏻\nhttps://api.whatsapp.com/send?phone=85221101144\n📞 94924444\n#港車北上 #汽車保險 #保費 #續保 #modelS #Tesla #modelY #BYD`,
+    2: `【${aiText}】\n🧐港車北上保險多少錢？\n市場行情參考：\n• 交強險 + 商業第三者責任險 + 醫保外用藥\n✅ 12次道路救援（拖車、送油、換胎）\n• 全套低至 ¥1469 起\n• 另有駕意險可加配\n與香港本地保險比較：\n✅ 性價比更高\n✅ 保障範圍更廣\n✅ 粵/國語雙語服務\n立馬 WhatsApp 比較報價！📱\nhttps://api.whatsapp.com/send?phone=85221101144\n📞 94924444\n#港車北上 #汽車保險 #保費 #續保 #modelS #Tesla #modelY #BYD`,
+    3: `【${aiText}】\n🚗 節省汽車保費｜ 保險報價｜私家車・電動車・營業車・港車北上\n續保預登記享折扣\n• 交強險 + 商業第三者責任險 + 醫保外用藥\n✅ 12次道路救援（拖車、送油、換胎）\n• 全套低至 ¥1469 起\n• 另有駕意險可加配\nWhatsApp 24小時報價👇\nhttps://api.whatsapp.com/send?phone=85221101144\n📞 94924444\n#汽車保險 #保險報價 #續保 #港車北上 #modelS #Tesla #modelY #BYD`
+  };
+  return templates[num] || templates[1];
+}
+
+function wait(ms) {
+  return new Promise(r => setTimeout(r, ms));
+}
+
+// 關閉多餘頁面，只保留一個
+async function cleanupPages(context, keepPage) {
+  const pages = context.pages();
+  for (const p of pages) {
+    if (p !== keepPage) {
+      try { await p.close(); } catch (e) {}
+    }
+  }
+}
+
+// 發文到單個群組（用同一個頁面）
+async function postToGroup(page, group, templateNum) {
+  const groupId = group.id;
+  const groupName = group.name;
+
+  if (hasAlreadyPosted(groupId)) {
+    console.log(`[跳過] ${groupName}`);
+    return { status: 'skipped', group_id: groupId, group_name: groupName, timestamp: new Date().toISOString() };
+  }
+
+  try {
+    // Step 1: 導航到群組
+    console.log(`[1] 導航: ${groupName}`);
+    await page.goto(`https://www.facebook.com/groups/${groupId}`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await wait(3000);
+
+    // 檢查是否跳到登入頁
+    if (page.url().includes('login')) {
+      console.log(`❌ 未登入，跳過`);
+      return { status: 'failed', group_id: groupId, group_name: groupName, error: '未登入', timestamp: new Date().toISOString() };
+    }
+
+    // Step 2: 點擊「寫點內容」打開建立帖子框
+    console.log(`[2] 打開建立帖子...`);
+    const clicked = await page.evaluate(() => {
+      const spans = document.querySelectorAll('span');
+      for (const s of spans) {
+        const text = s.textContent.trim();
+        if ((text.includes('寫點內容') || text.includes('Write something') || text.includes('建立帖子')) && s.offsetParent !== null) {
+          s.click();
+          return text;
+        }
+      }
+      return null;
+    });
+
+    if (!clicked) {
+      console.log(`❌ 找不到「寫點內容」`);
+      return { status: 'failed', group_id: groupId, group_name: groupName, error: '找不到寫點內容按鈕', timestamp: new Date().toISOString() };
+    }
+    console.log(`  ✅ 找到: ${clicked}`);
+    await wait(2000);
+
+    // Step 3: 找輸入框
+    console.log(`[3] 找輸入框...`);
+    const editorFound = await page.evaluate(() => {
+      const editables = document.querySelectorAll('div[contenteditable="true"][data-lexical-editor="true"]');
+      for (const el of editables) {
+        if (el.offsetParent !== null) {
+          el.focus();
+          return true;
+        }
+      }
+      return false;
+    });
+
+    if (!editorFound) {
+      console.log(`❌ 找不到輸入框`);
+      return { status: 'failed', group_id: groupId, group_name: groupName, error: '找不到輸入框', timestamp: new Date().toISOString() };
+    }
+
+    // Step 4: 附加圖片
+    console.log(`[4] 附加圖片...`);
+    const image = getRandomImage();
+    let uploaded = false;
+
+    // 嘗試點擊「附加相片或影片」
+    const photoBtns = await page.$$('[aria-label="附加相片或影片"]');
+    for (const btn of photoBtns) {
+      try {
+        if (!(await btn.isVisible())) continue;
+        const [fileChooser] = await Promise.all([
+          page.waitForEvent('filechooser', { timeout: 5000 }),
+          btn.click()
+        ]);
+        await fileChooser.setFiles(image);
+        uploaded = true;
+        console.log(`  ✅ 圖片已附加`);
+        break;
+      } catch (e) { continue; }
+    }
+
+    if (!uploaded) {
+      try {
+        const altBtn = await page.$('[aria-label="相片／影片"]');
+        if (altBtn) {
+          const [fileChooser] = await Promise.all([
+            page.waitForEvent('filechooser', { timeout: 5000 }),
+            altBtn.click()
+          ]);
+          await fileChooser.setFiles(image);
+          uploaded = true;
+          console.log(`  ✅ 圖片已附加(備用)`);
+        }
+      } catch (e) {}
+    }
+
+    if (!uploaded) console.log(`  ⚠️ 圖片附加失敗`);
+    await wait(3000);
+
+    // 關閉可能殘留的檔案選擇框
+    await page.keyboard.press('Escape');
+    await wait(500);
+
+    // Step 5: 貼文字
+    console.log(`[5] 貼文字...`);
+    const content = getTemplate(templateNum, getAIText());
+    await page.evaluate((text) => {
+      navigator.clipboard.writeText(text);
+    }, content).catch(() => {});
+    await page.keyboard.down('Meta');
+    await page.keyboard.press('KeyV');
+    await page.keyboard.up('Meta');
+    await wait(1000);
+    console.log(`  ✅ 文字已貼上`);
+
+    // Step 6: 點擊發佈
+    console.log(`[6] 點擊發佈...`);
+    let published = false;
+    for (let attempt = 0; attempt < 15; attempt++) {
+      const buttons = await page.$$('div[role="button"]');
+      for (const btn of buttons) {
+        const text = await btn.evaluate(el => el.textContent);
+        const disabled = await btn.evaluate(el => el.getAttribute('aria-disabled'));
+        if (text && (text.includes('發佈') || text.includes('Post') || text.includes('發布')) && disabled !== 'true') {
+          await btn.click();
+          published = true;
+          console.log(`  ✅ 已點擊發佈`);
+          break;
+        }
+      }
+      if (published) break;
+      await wait(1000);
+    }
+
+    if (!published) {
+      console.log(`❌ 找不到發佈按鈕`);
+      return { status: 'failed', group_id: groupId, group_name: groupName, error: '找不到發佈按鈕', timestamp: new Date().toISOString() };
+    }
+
+    // 等待發佈完成
+    await wait(3000);
+
+    console.log(`✅ 發文成功: ${groupName}`);
+    return { status: 'success', group_id: groupId, group_name: groupName, content, timestamp: new Date().toISOString() };
+
+  } catch (err) {
+    console.log(`❌ 發文失敗: ${err.message}`);
+    return { status: 'failed', group_id: groupId, group_name: groupName, error: err.message, timestamp: new Date().toISOString() };
+  }
+}
+
+async function main() {
+  console.log('========== Facebook 自動發文 v5 (精簡版) ==========');
+  console.log(`起始: ${startIndex}, 數量: ${postCount}`);
+
+  const browser = await chromium.connectOverCDP('http://localhost:9222');
+  const context = browser.contexts()[0];
+  console.log('✅ 已連接 Chrome');
+
+  // 找到已登入的頁面（不開新頁面！新頁面沒有 session cookies）
+  let page = null;
+  for (const p of context.pages()) {
+    if (p.url().includes('facebook.com') && !p.url().includes('login')) {
+      page = p;
+      break;
+    }
+  }
+
+  if (!page) {
+    console.log('❌ 找不到已登入的 Facebook 頁面');
+    return;
+  }
+  console.log(`✅ 使用已登入頁面: ${page.url().substring(0, 60)}`);
+
+  // 清理多餘頁面
+  await cleanupPages(context, page);
+
+  // 獲取目標群組
+  const templateNum = Math.floor(Math.random() * 3) + 1;
+  const targetGroups = CONFIG.groups.slice(startIndex, startIndex + postCount);
+
+  console.log(`\n========== 開始發文 (${targetGroups.length} 個群組) ==========\n`);
+
+  let success = 0, fail = 0, skip = 0;
+
+  for (let i = 0; i < targetGroups.length; i++) {
+    const group = targetGroups[i];
+    console.log(`\n[${i + 1}/${targetGroups.length}] ${group.name} (${group.id})`);
+
+    const result = await postToGroup(page, group, templateNum);
+    addPostRecord(result);
+
+    if (result.status === 'success' || result.status === 'pending_review') success++;
+    else if (result.status === 'skipped') skip++;
+    else fail++;
+
+    // 隨機等待 3-8 秒
+    if (i < targetGroups.length - 1 && result.status !== 'skipped') {
+      const waitTime = 3000 + Math.random() * 5000;
+      console.log(`等待 ${(waitTime / 1000).toFixed(1)} 秒...`);
+      await wait(waitTime);
+    }
+  }
+
+  console.log(`\n========== 完成 ==========`);
+  console.log(`✅ 成功: ${success}, ❌ 失敗: ${fail}, ⏭ 跳過: ${skip}`);
+}
+
+main().catch(err => {
+  console.error('錯誤:', err.message);
+  process.exit(1);
+});
