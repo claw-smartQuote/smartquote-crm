@@ -696,34 +696,47 @@ def parse_renewal_text(text, page_num=1):
     return info
 
 def process_pdf(pdf_path):
-    """Process PDF and return list of parsed records"""
-    text = extract_pdf_text(pdf_path)
-    page_count = get_pdf_page_count(pdf_path)
-
-    print(f"[PDF] Extracted {len(text)} chars, {page_count} pages")
-    print(f"[PDF] Full text:\n{text}")
-
+    """Process PDF and return list of parsed records — page by page via pymupdf."""
+    print(f"[PDF] Processing PDF: {pdf_path}")
     results = []
 
-    if text.strip():
-        # Try page-by-page parsing first
-        pages = re.split(r"\f|(?=\w+\s+\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})", text)
-        for i, page_text in enumerate(pages[:page_count]):
+    # Primary: use pymupdf to extract text page by page (most reliable)
+    try:
+        import pymupdf
+        doc = pymupdf.open(str(pdf_path))
+        page_count = len(doc)
+        print(f"[PDF] pymupdf opened: {page_count} pages")
+
+        for page_num in range(page_count):
+            page = doc[page_num]
+            page_text = page.get_text("text")
+            print(f"[PDF] Page {page_num+1}: {len(page_text)} chars")
+
             if page_text.strip():
-                info = parse_renewal_text(page_text, i+1)
+                info = parse_renewal_text(page_text, page_num + 1)
                 if info["name"] or info["license_plate"] or info["policy_number"]:
                     results.append(info)
+                    print(f"[PDF] Page {page_num+1} → ✅ {info.get('name','')} | {info.get('license_plate','')} | {info.get('policy_number','')}")
+                else:
+                    print(f"[PDF] Page {page_num+1} → ❌ no identifiable data")
 
-    # Fallback: if page-by-page parsing found nothing, try the FULL text
-    if not results and text.strip():
-        print("[PDF] Page-by-page found nothing, trying full text...")
-        info = parse_renewal_text(text, 1)
-        if info["name"] or info["license_plate"] or info["policy_number"]:
-            results.append(info)
+        doc.close()
+    except Exception as e:
+        print(f"[PDF] pymupdf failed: {e}")
+
+    # Fallback: pdftotext if pymupdf found nothing
+    if not results:
+        print("[PDF] pymupdf found nothing, trying pdftotext...")
+        text = extract_pdf_text(pdf_path)
+        if text.strip():
+            info = parse_renewal_text(text, 1)
+            if info["name"] or info["license_plate"] or info["policy_number"]:
+                results.append(info)
 
     if not results:
         results.append(parse_renewal_text("", 1))
 
+    print(f"[PDF] Total records found: {len(results)}")
     return results
 
 # ── Save to CRM ────────────────────────────────────────────────────────────────
