@@ -8,10 +8,10 @@ from sqlalchemy import create_engine, text, Column, Integer, String, Float, Date
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy.pool import NullPool
 
-DATABASE_URL = os.environ.get("DATABASE_URL", "") or \
-    "postgresql://smartquote_crm_db_user:AFxhpRnvs6zh1p2OUDs2U8KRuI0f21yx@dpg-d8l5gkv7f7vs73flll2g-a/smartquote_crm_db"
-
-_is_postgres = "postgresql://" in DATABASE_URL or "postgres://" in DATABASE_URL
+# Only use PostgreSQL if a real DATABASE_URL is set (e.g. on Render)
+# Default: use local SQLite database
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
+_is_postgres = DATABASE_URL and ("postgresql://" in DATABASE_URL or "postgres://" in DATABASE_URL)
 
 if _is_postgres:
     engine = create_engine(DATABASE_URL, poolclass=NullPool)

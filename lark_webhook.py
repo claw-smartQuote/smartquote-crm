@@ -16,7 +16,7 @@ import urllib.parse
 LARK_API_BASE = "https://open.larksuite.com/open-apis"
 LARK_APP_ID = os.environ.get("LARK_APP_ID", "cli_aaa0809c34389e18")
 LARK_APP_SECRET = os.environ.get("LARK_APP_SECRET", "r0az2k1jETYxHF2DxiR0MbcukUkKQZFU")
-CRM_URL = os.environ.get("CRM_URL", "https://smartquote-crm.onrender.com")
+CRM_URL = os.environ.get("CRM_URL", "http://192.168.86.160:8899")
 
 # ── Lark Token Cache ──────────────────────────────────────────────────────────
 _tenant_token = {"token": None, "expires_at": 0}
@@ -151,7 +151,7 @@ def extract_pdf_text(pdf_path):
         print(f"[PDF] pymupdf opened: {len(doc)} pages")
         ocr_texts = []
         for page_num, page in enumerate(doc):
-            pix = page.get_pixmap(matrix=pymupdf.Matrix(2, 2))
+            pix = page.get_pixmap(matrix=pymupdf.Matrix(3, 3))
             with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
                 pix.save(tmp.name)
                 tmp_path = tmp.name
@@ -319,10 +319,16 @@ def parse_renewal_text(text, page_num=1):
     # ── Insurance company detection ──
     if "Dah Sing" in text:
         info["insurance_company"] = "達信保險 Dah Sing"
+    elif "ZPP" in text or "zurich" in text.lower() or "蘇黎世" in text:
+        info["insurance_company"] = "蘇黎世保險 Zurich"
     elif "Well Link" in text or "WELL LINK" in text:
         info["insurance_company"] = "宏利保險 Well Link"
     elif "PROGRESS" in text.upper() or "ROGRESS" in text:
-        info["insurance_company"] = "忠意保險 Progress"
+        # Progress is an agent, not insurer — check policy prefix for actual insurer
+        if "ZPP" in text:
+            info["insurance_company"] = "蘇黎世保險 Zurich"
+        else:
+            info["insurance_company"] = "忠意保險 Progress"
     elif "永誠" in text or "Yong Cheng" in text or "YONGCHENG" in text:
         info["insurance_company"] = "永誠保險"
     elif "FWD" in text:
@@ -358,7 +364,7 @@ def parse_renewal_text(text, page_num=1):
         # Renewal notice: "Name" on one line, "：VALUE" on next line (OCR layout)
         r"Name\s*\n\s*[：:]\s*([A-Z][A-Z \t&]{2,30})",
         # Standard "Name: VALUE"
-        r"Name[：:]\s*([A-Z][A-Z \t&]{2,30})",
+        r"Name\s*[：:]\s*([A-Z][A-Z \t&]{2,30})",
     ]
     bad_words = ["flat", "house", "estate", "floor", "block", "road", "street",
                  "company", "limited", "n/a", "property", "occupation",
@@ -406,8 +412,10 @@ def parse_renewal_text(text, page_num=1):
         r"Vehicle\s*Reg[.:\s]*([A-Z]{1,3}[ \t]?\d{1,5}(?:[ \t]?[A-Z])?)",
         # Chinese labels
         r"車牌[號編]?[：:]*\s*([A-Z0-9]{2,12})",
-        # HK plate: 1-2 letters + 1-4 digits + optional letter (lower priority — false positives possible)
+        # HK plate: 2 letters + 1-4 digits + optional letter (lower priority — false positives possible)
         r"\b([A-Z]{2}\s?\d{3,4}\s?[A-Z]?)\b",
+        # HK plate: 1 letter + 1-4 digits (e.g. W713, A1234) — needs context to avoid false positives
+        r"\b([A-Z]\d{3,4}[A-Z]?)\b",
         # 粤港澳 plates
         r"([粵粤][A-Z]\s?\d{4,5}\s?[港澳])",
     ]
@@ -442,7 +450,7 @@ def parse_renewal_text(text, page_num=1):
         r"\b(\d{2,}PMV\d{2,}[\-A-Z0-9]*)\b",  # generic PMV format
         r"\b(PMV\d{4,}[\-A-Z0-9]*)\b",  # PMV prefix
         # Well Link / generic format with full-width or half-width colon
-        r"Polic[yY]?\s*No[.]*\s*[：:]\s*([A-Z0-9][A-Z0-9/\-]{3,24})",
+        r"[Pp]olic[yY]?\s*[Nn]o[.]*\s*[：:]\s*([A-Z0-9][A-Z0-9/\-]{3,24})",
         r"Policy\s*Number\s*[：:]\s*([A-Z0-9][A-Z0-9/\-]{3,24})",
         r"POLICY\s*NO[.]*\s*[：:]\s*([A-Z0-9][A-Z0-9/\-]{3,24})",
         r"保單[號号]碼[：:]\s*([A-Z0-9][A-Z0-9\-]{3,24})",
@@ -480,6 +488,12 @@ def parse_renewal_text(text, page_num=1):
         r"Gross\s*Premium\s*(?:HK\$|HKD)\s*([0-9,]+\.?\d*)",
         r"(?:保費|總保費)[^$\d]*?(?:HK\$|HKD)\s*([0-9,]+\.?\d*)",
         r"(?:Premium|總計)[^$\d]*?(?:HK\$|HKD)\s*([0-9,]+\.?\d*)",
+        # OCR format: "COMPREHENSIVE  54,000.00  8,809.90" — second number is premium
+        r"COMPREHENSIVE\s+[\d,.]+\s+([\d,]+\.\d+)",
+        # "TOTAL : 3,629.70"
+        r"TOTAL\s*:\s*([\d,]+\.?\d+)",
+        # Standalone amount after "Premium" label
+        r"Premium\s*[\n:]*\s*([\d,]+\.\d{2})",
     ]
     for pat in premium_patterns:
         m = re.search(pat, text, re.IGNORECASE)
@@ -511,11 +525,11 @@ def parse_renewal_text(text, page_num=1):
     # Numeric formats dd/mm/yyyy or dd-mm-yyyy
     date_patterns = [
         (r"生效[日日期:：\s]*\s*(\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})", "effective_date"),
-        (r"Effect\s*From[：:]*\s*(\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})", "effective_date"),
+        (r"Effect\s*From\s*[;：:]*\s*(\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})", "effective_date"),
         (r"起保[日日期:：\s]*\s*(\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})", "effective_date"),
-        (r"Inception[：:]*\s*(\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})", "effective_date"),
+        (r"Inception\s*[;：:]*\s*(\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})", "effective_date"),
         (r"到期[日日期:：\s]*\s*(\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})", "expiry_date"),
-        (r"Expiry\s*Date[：:]*\s*(\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})", "expiry_date"),
+        (r"Expiry\s*Date\s*[;：:]*\s*(\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})", "expiry_date"),
         (r"屆滿[日日期:：\s]*\s*(\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})", "expiry_date"),
     ]
     for pat, field in date_patterns:
@@ -696,11 +710,10 @@ def parse_renewal_text(text, page_num=1):
     return info
 
 def process_pdf(pdf_path):
-    """Process PDF and return list of parsed records — page by page via pymupdf."""
+    """Process PDF and return list of parsed records — page by page via pymupdf + OCR fallback."""
     print(f"[PDF] Processing PDF: {pdf_path}")
     results = []
 
-    # Primary: use pymupdf to extract text page by page (most reliable)
     try:
         import pymupdf
         doc = pymupdf.open(str(pdf_path))
@@ -710,6 +723,29 @@ def process_pdf(pdf_path):
         for page_num in range(page_count):
             page = doc[page_num]
             page_text = page.get_text("text")
+
+            # If no text layer (scanned PDF), OCR the page
+            if not page_text.strip():
+                print(f"[PDF] Page {page_num+1}: 0 chars from text layer, trying OCR...")
+                try:
+                    pix = page.get_pixmap(matrix=pymupdf.Matrix(3, 3))
+                    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                        pix.save(tmp.name)
+                        tmp_path = tmp.name
+                    try:
+                        import pytesseract
+                        from PIL import Image
+                        img_pil = Image.open(tmp_path)
+                        page_text = pytesseract.image_to_string(img_pil, lang='chi_tra+eng')
+                        print(f"[PDF] Page {page_num+1} OCR: {len(page_text)} chars")
+                    except Exception as e:
+                        print(f"[PDF] Page {page_num+1} OCR failed: {e}")
+                    finally:
+                        if os.path.exists(tmp_path):
+                            os.unlink(tmp_path)
+                except Exception as e:
+                    print(f"[PDF] Page {page_num+1} pixmap failed: {e}")
+
             print(f"[PDF] Page {page_num+1}: {len(page_text)} chars")
 
             if page_text.strip():
@@ -724,15 +760,6 @@ def process_pdf(pdf_path):
     except Exception as e:
         print(f"[PDF] pymupdf failed: {e}")
 
-    # Fallback: pdftotext if pymupdf found nothing
-    if not results:
-        print("[PDF] pymupdf found nothing, trying pdftotext...")
-        text = extract_pdf_text(pdf_path)
-        if text.strip():
-            info = parse_renewal_text(text, 1)
-            if info["name"] or info["license_plate"] or info["policy_number"]:
-                results.append(info)
-
     if not results:
         results.append(parse_renewal_text("", 1))
 
@@ -741,11 +768,21 @@ def process_pdf(pdf_path):
 
 # ── Save to CRM ────────────────────────────────────────────────────────────────
 def save_to_crm(info):
-    """Save parsed info to CRM, return result dict"""
+    """Save parsed info to CRM, return result dict. Uses direct DB in local mode."""
     if not info.get("name") and not info.get("license_plate") and not info.get("policy_number"):
         return {"error": "無法識別任何資料"}
 
     name = info.get("name") or "未知客戶"
+
+    # Use direct database calls when running locally (SQLite)
+    try:
+        import database as db
+        if not db._is_postgres:
+            return _save_to_crm_direct(db, info)
+    except Exception as e:
+        print(f"[CRM] Direct DB mode failed, falling back to HTTP: {e}")
+
+    # Fallback: HTTP API (for Render/cloud mode)
     customer = crm_find_customer_by_name(name)
 
     if not customer:
@@ -779,6 +816,60 @@ def save_to_crm(info):
     return {
         "ok": True,
         "customer": customer["name"],
+        "customer_id": cid,
+        "policy_type": info.get("policy_type"),
+        "license_plate": info.get("license_plate"),
+        "premium": info.get("premium"),
+    }
+
+
+def _save_to_crm_direct(db, info):
+    """Save to CRM using direct database calls (local SQLite mode)."""
+    name = info.get("name") or "未知客戶"
+
+    # Find or create customer
+    customers = db.get_all_customers(include_potential=True)
+    customer = None
+    for c in customers:
+        if name in c.get("name", ""):
+            customer = c
+            break
+
+    if not customer:
+        result = db.create_customer(name, info.get("phone", ""), "")
+        cid = result["id"] if isinstance(result, dict) else result
+        print(f"[CRM] Created customer: {name} (id={cid})")
+    else:
+        cid = customer["id"]
+        print(f"[CRM] Found customer: {name} (id={cid})")
+
+    # Create renewal
+    from datetime import date as _date
+    today = _date.today().isoformat()
+    effective_date = info.get("effective_date", "") or today
+    expiry_date = info.get("expiry_date", "") or today
+
+    renewal = db.create_renewal(
+        original_policy_id=None,
+        customer_id=cid,
+        license_plate=info.get("license_plate", ""),
+        insurance_company=info.get("insurance_company", "永誠保險"),
+        policy_type=info.get("policy_type", "其他"),
+        coverage_amount=info.get("coverage_amount", 0),
+        premium=info.get("premium", 0),
+        effective_date=effective_date,
+        expiry_date=expiry_date,
+        notes=info.get("notes", ""),
+        agent_person="",
+        policy_number=info.get("policy_number", ""),
+        vehicle_model=info.get("vehicle_model", ""),
+        phone=info.get("phone", "")
+    )
+    print(f"[CRM] Created renewal: {renewal}")
+
+    return {
+        "ok": True,
+        "customer": name,
         "customer_id": cid,
         "policy_type": info.get("policy_type"),
         "license_plate": info.get("license_plate"),
